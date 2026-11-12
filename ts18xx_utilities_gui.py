@@ -492,8 +492,21 @@ class SpdmLogTab(ttk.Frame):
         self.preview.configure(state="disabled")
 
     def _i2c_hint(self):
+        """選 I2C 時顯示提示;換成 SPI / I3C 時把輸出視窗裡的提示全部清掉。"""
         if self.vars["iface"].get() == "i2c":
-            self._append("[提示] 使用 I2C 介面時,需使用 Aardvark I2C Port\n", "info")
+            ranges = self.log.tag_ranges("i2c_hint")
+            # 輸出視窗最後一段已經是提示(例如重複點選 I2C),就不再重複加
+            if ranges and self.log.compare(ranges[-1], ">=", "end-1c"):
+                return
+            self._append("[提示] 使用 I2C 介面時,需使用 Aardvark I2C Port\n", ("info", "i2c_hint"))
+        else:
+            ranges = self.log.tag_ranges("i2c_hint")
+            if not ranges:
+                return
+            self.log.configure(state="normal")
+            for i in range(len(ranges) - 2, -1, -2):
+                self.log.delete(ranges[i], ranges[i + 1])
+            self.log.configure(state="disabled")
 
     # ---------- 執行 ----------
     def _set_running(self, running):
