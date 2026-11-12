@@ -392,6 +392,9 @@ class SpdmLogTab(ttk.Frame):
         for var in self.vars.values():
             var.trace_add("write", lambda *_: (self._update_preview(), self.on_change()))
         self._update_preview()
+        # 選到 I2C 時,在輸出視窗先提示要用 Aardvark I2C Port
+        self.vars["iface"].trace_add("write", lambda *_: self._i2c_hint())
+        self._i2c_hint()
         self.after(100, self._poll_output)
 
     def _build_ui(self):
@@ -488,6 +491,10 @@ class SpdmLogTab(ttk.Frame):
         self.preview.insert("1.0", subprocess.list2cmdline(self.build_cmd()))
         self.preview.configure(state="disabled")
 
+    def _i2c_hint(self):
+        if self.vars["iface"].get() == "i2c":
+            self._append("[提示] 使用 I2C 介面時,需使用 Aardvark I2C Port\n", "info")
+
     # ---------- 執行 ----------
     def _set_running(self, running):
         self.btn_run.configure(state="disabled" if running else "normal")
@@ -509,6 +516,7 @@ class SpdmLogTab(ttk.Frame):
 
         cmd = self.build_cmd()
         self._append("\n===== SPDM Run =====\n", "info")
+        self._i2c_hint()
         self._append(f"> {subprocess.list2cmdline(cmd)}\n", "info")
         self.status.set("執行中")
         self._set_running(True)
