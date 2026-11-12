@@ -32,6 +32,10 @@ TFLX_DEFAULT_EXE = r"C:\Users\jason\tpds\2.3.9_ts18xx_v100\Scripts\ts18xx_tflx_p
 TFLX_DEFAULT_IMG = r"C:\Users\jason\.trustplatform\ts18xx_tools_assets_1.0.0rc5\build\ap_otp.bin"
 
 
+# SPDM Log Paser 分頁的預設路徑(在 PATH 內時直接用檔名即可)
+SPDM_DEFAULT_EXE = "ts18xx_spdm.exe"
+
+
 def _stream_env():
     # 讓工具(Python 程式)輸出 UTF-8,否則輸出到管道時會用 cp950,字元會亂碼
     return dict(os.environ, PYTHONUNBUFFERED="1",
@@ -359,6 +363,41 @@ class TflxProvTab(ttk.Frame):
         self.log.configure(state="disabled")
 
 
+class SpdmLogTab(ttk.Frame):
+    """SPDM Log Paser 分頁:目前只有 ts18xx_spdm.exe 的路徑欄位"""
+
+    def __init__(self, parent, saved, on_change):
+        super().__init__(parent)
+        self.on_change = on_change
+        v = saved.get("spdm_exe")
+        self.vars = {
+            "exe": tk.StringVar(value=v if isinstance(v, str) and v else SPDM_DEFAULT_EXE),
+        }
+        self._build_ui()
+        for var in self.vars.values():
+            var.trace_add("write", lambda *_: self.on_change())
+
+    def _build_ui(self):
+        pad = {"padx": 6, "pady": 5}
+
+        f = ttk.LabelFrame(self, text="路徑")
+        f.pack(fill="x", padx=10, pady=(10, 4))
+        f.columnconfigure(1, weight=1)
+
+        ttk.Label(f, text="ts18xx_spdm.exe").grid(row=0, column=0, sticky="e", **pad)
+        ttk.Entry(f, textvariable=self.vars["exe"]).grid(row=0, column=1, sticky="ew", **pad)
+        ttk.Button(f, text="選擇…", command=self._browse_exe).grid(row=0, column=2, **pad)
+
+    def _browse_exe(self):
+        init = os.path.dirname(self.vars["exe"].get()) or None
+        if init and not os.path.isdir(init):
+            init = None
+        p = filedialog.askopenfilename(title="選擇 ts18xx_spdm.exe", initialdir=init,
+                                       filetypes=[("可執行檔", "*.exe *.bat *.cmd"), ("所有檔案", "*.*")])
+        if p:
+            self.vars["exe"].set(os.path.normpath(p))
+
+
 class FlashGui(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -395,6 +434,8 @@ class FlashGui(tk.Tk):
         self._build_ui(tab_flash)
         self.tflx = TflxProvTab(self.nb, self._raw, self._save_settings)
         self.nb.add(self.tflx, text="TFLX Provisioning")
+        self.spdm = SpdmLogTab(self.nb, self._raw, self._save_settings)
+        self.nb.add(self.spdm, text="SPDM Log Paser")
 
         for v in list(self.vars.values()) + list(self.sel.values()):
             v.trace_add("write", lambda *_: (self._update_preview(), self._save_settings()))
@@ -769,6 +810,9 @@ class FlashGui(tk.Tk):
         if tflx is not None:
             data["tflx_exe"] = tflx.vars["exe"].get()
             data["tflx_img"] = tflx.vars["img"].get()
+        spdm = getattr(self, "spdm", None)
+        if spdm is not None:
+            data["spdm_exe"] = spdm.vars["exe"].get()
         try:
             SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError:
