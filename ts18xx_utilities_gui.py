@@ -31,7 +31,7 @@ DEFAULTS = {
     "speed": "12",
     "bus_width": "single",
 }
-FLASH_SPEEDS = ("12", "15", "20", "40")          # --speed (MHz)
+FLASH_SPEEDS = ("12", "15", "20", "24")          # --speed (MHz)
 FLASH_BUS_WIDTHS = ("single", "dual", "quad")    # --bus_width
 
 # TFLX Provisioning 分頁的預設路徑
