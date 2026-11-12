@@ -369,6 +369,9 @@ class SpdmLogTab(ttk.Frame):
     def __init__(self, parent, saved, on_change):
         super().__init__(parent)
         self.on_change = on_change
+        self.proc = None
+        self.out_q = queue.Queue()
+        self._cr_pending = False
         v = saved.get("spdm_exe")
         self.vars = {
             "exe": tk.StringVar(value=v if isinstance(v, str) and v else SPDM_DEFAULT_EXE),
@@ -376,6 +379,7 @@ class SpdmLogTab(ttk.Frame):
         self._build_ui()
         for var in self.vars.values():
             var.trace_add("write", lambda *_: self.on_change())
+        self.after(100, self._poll_output)
 
     def _build_ui(self):
         pad = {"padx": 6, "pady": 5}
@@ -388,6 +392,37 @@ class SpdmLogTab(ttk.Frame):
         ttk.Entry(f, textvariable=self.vars["exe"]).grid(row=0, column=1, sticky="ew", **pad)
         ttk.Button(f, text="選擇…", command=self._browse_exe).grid(row=0, column=2, **pad)
 
+        ttk.Label(self, foreground="gray",
+                  text="固定參數:--iface_type spi  --port 0  --slot_index 0  --spdm_version 1.4").pack(
+            anchor="w", padx=14, pady=(0, 2))
+
+        # 按鈕
+        f_btn = ttk.Frame(self)
+        f_btn.pack(fill="x", padx=10, pady=4)
+        self.btn_run = ttk.Button(f_btn, text="▶ Run", command=self.run)
+        self.btn_run.pack(side="left")
+        self.btn_stop = ttk.Button(f_btn, text="■ 停止", command=self.stop, state="disabled")
+        self.btn_stop.pack(side="left", padx=6)
+        ttk.Button(f_btn, text="清除輸出", command=self._clear_log).pack(side="left")
+        self.status = tk.StringVar(value="就緒")
+        ttk.Label(f_btn, textvariable=self.status).pack(side="right")
+
+        # 輸出
+        f_log = ttk.LabelFrame(self, text="輸出")
+        f_log.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+        f_log.rowconfigure(0, weight=1)
+        f_log.columnconfigure(0, weight=1)
+        self.log = tk.Text(f_log, wrap="none", state="disabled", font=("Consolas", 10))
+        ys = ttk.Scrollbar(f_log, orient="vertical", command=self.log.yview)
+        xs = ttk.Scrollbar(f_log, orient="horizontal", command=self.log.xview)
+        self.log.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+        self.log.grid(row=0, column=0, sticky="nsew")
+        ys.grid(row=0, column=1, sticky="ns")
+        xs.grid(row=1, column=0, sticky="ew")
+        self.log.tag_configure("err", foreground="#c0392b")
+        self.log.tag_configure("ok", foreground="#1e8449")
+        self.log.tag_configure("info", foreground="#2471a3")
+
     def _browse_exe(self):
         init = os.path.dirname(self.vars["exe"].get()) or None
         if init and not os.path.isdir(init):
@@ -396,6 +431,132 @@ class SpdmLogTab(ttk.Frame):
                                        filetypes=[("可執行檔", "*.exe *.bat *.cmd"), ("所有檔案", "*.*")])
         if p:
             self.vars["exe"].set(os.path.normpath(p))
+
+    # ---------- 指令組合 ----------
+    def build_cmd(self):
+        return [self.vars["exe"].get().strip(),
+                "--iface_type", "spi", "--port", "0",
+                "--slot_index", "0", "--spdm_version", "1.4"]
+
+    # ---------- 執行 ----------
+    def _set_running(self, running):
+        self.btn_run.configure(state="disabled" if running else "normal")
+        self.btn_stop.configure(state="normal" if running else "disabled")
+
+    def run(self):
+        if self.proc is not None:
+            return
+        if not self.vars["exe"].get().strip():
+            messagebox.showwarning("缺少參數", "請先填入 ts18xx_spdm.exe 的路徑。")
+            return
+
+        cmd = self.build_cmd()
+        self._append("\n===== SPDM Run =====\n", "info")
+        self._append(f"> {subprocess.list2cmdline(cmd)}\n", "info")
+        self.status.set("執行中")
+        self._set_running(True)
+
+        flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        try:
+            self.proc = subprocess.Popen(
+                cmd, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                bufsize=0, env=_stream_env(), creationflags=flags)
+        except FileNotFoundError:
+            self._append("找不到 ts18xx_spdm.exe,請確認路徑或 PATH 設定。\n", "err")
+            self._set_running(False)
+            self.status.set("失敗:找不到執行檔")
+            return
+        except Exception as e:
+            self._append(f"啟動失敗:{e}\n", "err")
+            self._set_running(False)
+            self.status.set("失敗")
+            return
+
+        threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
+
+    def _reader(self, proc):
+        dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        while True:
+            chunk = proc.stdout.read(4096)
+            if not chunk:
+                break
+            text = dec.decode(chunk)
+            if text:
+                self.out_q.put(("data", text))
+        proc.wait()
+        self.out_q.put(("done", proc.returncode))
+
+    def _poll_output(self):
+        try:
+            while True:
+                kind, data = self.out_q.get_nowait()
+                if kind == "data":
+                    self._append_stream(data)
+                else:
+                    self._finish(data)
+        except queue.Empty:
+            pass
+        self.after(100, self._poll_output)
+
+    def _finish(self, code):
+        self.proc = None
+        self._end_stream_line()
+        if code == 0:
+            self._append("[完成] 結束碼 0\n", "ok")
+            self.status.set("完成")
+        else:
+            self._append(f"[失敗] 結束碼 {code}\n", "err")
+            self.status.set(f"失敗(結束碼 {code})")
+        self._set_running(False)
+
+    def stop(self):
+        if self.proc is not None:
+            self.proc.terminate()
+            self._append("[已要求停止]\n", "err")
+
+    def terminate(self):
+        if self.proc is not None:
+            self.proc.terminate()
+
+    # ---------- 輸出 ----------
+    def _append(self, text, tag=None):
+        self.log.configure(state="normal")
+        self.log.insert("end", text, tag)
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def _append_stream(self, text):
+        """\\r 代表回到行首,下一段文字覆蓋同一行。"""
+        text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+        self.log.configure(state="normal")
+        for tok in re.split(r"(\r\n|\r|\n)", text):
+            if not tok:
+                continue
+            if tok == "\r":
+                self._cr_pending = True
+            elif tok in ("\n", "\r\n"):
+                self.log.insert("end", "\n")
+                self._cr_pending = False
+            else:
+                if self._cr_pending:
+                    self.log.delete("end-1c linestart", "end-1c")
+                    self._cr_pending = False
+                self.log.insert("end", tok)
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def _end_stream_line(self):
+        self._cr_pending = False
+        self.log.configure(state="normal")
+        if self.log.get("end-2c", "end-1c") not in ("\n", ""):
+            self.log.insert("end", "\n")
+        self.log.configure(state="disabled")
+
+    def _clear_log(self):
+        self.log.configure(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.configure(state="disabled")
 
 
 class FlashGui(tk.Tk):
@@ -819,7 +980,8 @@ class FlashGui(tk.Tk):
             pass
 
     def _on_close(self):
-        busy = self.proc is not None or self.tflx.proc is not None
+        busy = (self.proc is not None or self.tflx.proc is not None
+                or self.spdm.proc is not None)
         if busy:
             if not messagebox.askyesno("確認", "仍有程序在執行,確定要離開嗎?"):
                 return
@@ -827,6 +989,7 @@ class FlashGui(tk.Tk):
             if self.proc is not None:
                 self.proc.terminate()
             self.tflx.terminate()
+            self.spdm.terminate()
         self._save_settings()
         self.destroy()
 
