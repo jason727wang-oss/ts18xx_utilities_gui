@@ -1,4 +1,5 @@
 import codecs
+import hashlib
 import json
 import os
 import queue
@@ -393,6 +394,159 @@ def _spdm_ascii(hexv):
     return ""
 
 
+_DER_OIDS = {"2.5.4.3": "CN", "2.5.4.10": "O", "2.5.4.11": "OU",
+             "2.5.4.6": "C", "2.5.4.5": "serialNumber"}
+# 雜湊長度(bytes) -> (hashlib 名稱, 顯示名稱)
+_HASH_ALGOS = {32: ("sha256", "SHA-256"), 48: ("sha384", "SHA-384"), 64: ("sha512", "SHA-512")}
+
+
+def _der_read(buf, pos):
+    """讀一個 DER TLV,回傳 (tag, 內容起點, 內容終點)。"""
+    tag = buf[pos]
+    n = buf[pos + 1]
+    pos += 2
+    if n & 0x80:
+        k = n & 0x7F
+        n = int.from_bytes(buf[pos:pos + k], "big")
+        pos += k
+    return tag, pos, pos + n
+
+
+def _der_oid(content):
+    parts = [content[0] // 40, content[0] % 40]
+    val = 0
+    for b in content[1:]:
+        val = (val << 7) | (b & 0x7F)
+        if not b & 0x80:
+            parts.append(val)
+            val = 0
+    return ".".join(str(p) for p in parts)
+
+
+def _der_name(buf, start, end):
+    """X.509 Name 轉成 "O=..., CN=..." 文字(每個欄位只取第一組屬性)。"""
+    parts = []
+    pos = start
+    while pos < end:
+        _, rdn_s, rdn_e = _der_read(buf, pos)      # RDN (SET)
+        _, atv_s, _ = _der_read(buf, rdn_s)        # AttributeTypeAndValue (SEQUENCE)
+        _, oid_s, oid_e = _der_read(buf, atv_s)    # OID
+        _, val_s, val_e = _der_read(buf, oid_e)    # 值
+        oid = _der_oid(buf[oid_s:oid_e])
+        parts.append(f"{_DER_OIDS.get(oid, oid)}={buf[val_s:val_e].decode('utf-8', 'replace')}")
+        pos = rdn_e
+    return ", ".join(parts)
+
+
+def _der_time(tag, content):
+    s = content.decode("ascii", "replace")
+    if tag == 0x17:  # UTCTime
+        yy = int(s[:2])
+        year, rest = (1900 + yy if yy >= 50 else 2000 + yy), s[2:]
+    else:            # GeneralizedTime
+        year, rest = int(s[:4]), s[4:]
+    return f"{year}-{rest[0:2]}-{rest[2:4]} {rest[4:6]}:{rest[6:8]}:{rest[8:10]}Z"
+
+
+def _x509_summary(der):
+    """從 DER 憑證取出 Subject / Issuer / 有效期間;解析失敗就回傳空字典。"""
+    try:
+        _, pos, _ = _der_read(der, 0)               # Certificate
+        _, pos, _ = _der_read(der, pos)             # tbsCertificate
+        tag, _, end = _der_read(der, pos)
+        if tag == 0xA0:                             # [0] version(v1 憑證沒有這一段)
+            pos = end
+            _, _, end = _der_read(der, pos)
+        pos = end                                   # serialNumber 之後
+        _, _, pos = _der_read(der, pos)             # signature AlgorithmIdentifier
+        _, s, e = _der_read(der, pos)               # issuer
+        issuer = _der_name(der, s, e)
+        _, s, pos = _der_read(der, e)               # validity
+        t1, a, b = _der_read(der, s)
+        not_before = _der_time(t1, der[a:b])
+        t2, a, b = _der_read(der, b)
+        not_after = _der_time(t2, der[a:b])
+        _, s, e = _der_read(der, pos)               # subject
+        subject = _der_name(der, s, e)
+        return {"subject": subject, "issuer": issuer,
+                "not_before": not_before, "not_after": not_after}
+    except Exception:
+        return {}
+
+
+def _spdm_chain_rows(rsp_hex, digest_hex):
+    """解析 Get Certificate 的回應,回傳「憑證鏈結構」的說明與實際資料(顯示列)。"""
+    rsp = bytes.fromhex(rsp_hex)
+    portion = int.from_bytes(rsp[4:6], "little")      # 回應檔頭 8 bytes:版本、代碼、Param1/2、兩個長度
+    chain = rsp[8:8 + portion]
+    hsize = None
+    for cand in ([len(digest_hex) // 2] if digest_hex else []) + [48, 32, 64]:
+        if cand in _HASH_ALGOS and len(chain) > 4 + cand and chain[4 + cand] == 0x30:
+            hsize = cand
+            break
+    if hsize is None:
+        return []
+    algo, algo_name = _HASH_ALGOS[hsize]
+    length = int.from_bytes(chain[0:2], "little")
+    root_hash = chain[4:4 + hsize]
+
+    rows = [
+        ("結構說明(SPDM 規格 DSP0274 的 Certificate chain format):", None),
+        ("Offset  Size  Field         說明", None),
+        ("0       2     Length        整個結構的總長度(含 Length、Reserved、RootHash 與所有憑證)", None),
+        ("2       2     Reserved      保留,值為 0", None),
+        ("4       H     RootHash      根憑證(DER)的雜湊;H 為雜湊長度(SHA-384 為 48)", None),
+        ("4+H     其餘  Certificates  DER 編碼的 X.509 v3 憑證,由根憑證依序排到最末端憑證", None),
+        ("Cert Chain Digest = Hash(整個結構,從 Length 欄位開始)", None),
+        ("", None),
+        ("實際資料:", None),
+        ("Offset  Size  Field         值", None),
+        (f"{0:<8}{2:<6}{'Length':<14}{length} (0x{length:04X})", None),
+        (f"{2:<8}{2:<6}{'Reserved':<14}0x{chain[2:4].hex().upper()}", None),
+        (f"{4:<8}{hsize:<6}{'RootHash':<14}{root_hash.hex().upper()}", None),
+    ]
+    certs_rows = []
+    pos = 4 + hsize
+    idx = 0
+    try:
+        while pos + 4 <= len(chain) and chain[pos] == 0x30:
+            _, _, end = _der_read(chain, pos)
+            der = chain[pos:end]
+            info = _x509_summary(der)
+            certs_rows.append((f"cert{idx}  offset {pos}  {len(der)} bytes"
+                               + ("  (根憑證)" if idx == 0 else ""), None))
+            if info:
+                certs_rows += [(f"    Subject:  {info['subject']}", None),
+                               (f"    Issuer:   {info['issuer']}", None),
+                               (f"    Validity: {info['not_before']} ~ {info['not_after']}", None)]
+            if idx == 0:
+                h = hashlib.new(algo, der).digest()
+                ok = h == root_hash
+                certs_rows.append((f"    {algo_name}(cert0) = {h.hex().upper()}", None))
+                certs_rows.append((f"    {'✔' if ok else '✘'} 與 RootHash {'相符' if ok else '不相符'}",
+                                   "ok" if ok else "err"))
+            pos = end
+            idx += 1
+    except IndexError:
+        certs_rows.append(("(憑證資料不完整,後面的憑證無法解析)", "err"))
+    rows.append((f"{4 + hsize:<8}{max(len(chain) - 4 - hsize, 0):<6}{'Certificates':<14}共 {idx} 張", None))
+    rows += certs_rows
+
+    if digest_hex:
+        rows.append(("", None))
+        if len(chain) == length:
+            h = hashlib.new(algo, chain).digest().hex().upper()
+            ok = h == digest_hex.upper()
+            rows.append((f"Cert Chain Digest = {algo_name}(上述整個結構,共 {length} bytes)", None))
+            rows.append((f"    = {h}", None))
+            rows.append((f"    {'✔' if ok else '✘'} "
+                         f"與裝置回報的 Cert Chain Digest {'相符' if ok else '不相符'}",
+                         "ok" if ok else "err"))
+        else:
+            rows.append(("(回應只包含部分憑證鏈,無法重新計算 Cert Chain Digest)", None))
+    return rows
+
+
 def parse_spdm_output(text, code):
     """把 ts18xx_spdm 的輸出整理成 [(文字, tag), ...];tag 為 None / hdr / ok / err。"""
     entries = []  # [等級, 訊息];沒有時間戳記的行(例如 hex dump)接在上一筆後面
@@ -457,6 +611,16 @@ def parse_spdm_output(text, code):
         if m:
             sym, tag = _spdm_mark(m.group(0))
             rows_cert.append((f"{sym} {m.group(0)}", tag))
+
+    # --- 憑證鏈結構(從 Get Certificate 的回應位元組解析) ---
+    rows_chain = []
+    m_rsp = find(r"Name: Get All Certs, WriteBytes: [0-9A-Fa-f]*, ReadBytes: ([0-9A-Fa-f]+)")
+    if m_rsp:
+        m_dig = find(r"Cert Chain Digest: ([0-9A-Fa-f]+)")
+        try:
+            rows_chain = _spdm_chain_rows(m_rsp.group(1), m_dig.group(1) if m_dig else "")
+        except Exception as e:
+            rows_chain = [(f"憑證鏈結構解析失敗:{e}", "err")]
 
     # --- 簽章 ---
     rows_sig = []
@@ -531,6 +695,7 @@ def parse_spdm_output(text, code):
     section("警告 / 錯誤", [(msg, "err") for msg in problems])
     section("連線資訊", rows_conn)
     section("憑證", rows_cert)
+    section("憑證鏈結構", rows_chain)
     section("簽章", rows_sig)
     section("量測區塊", rows_meas)
     section("其他資訊", rows_extra)
