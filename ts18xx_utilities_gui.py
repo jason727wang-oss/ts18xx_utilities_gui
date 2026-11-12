@@ -13,7 +13,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 
-#1.0.3
+#1.0.4
 
 # 設定存在使用者家目錄(一定可寫入);舊版存在程式旁邊的檔案仍會讀取一次
 SETTINGS_FILE = Path.home() / ".ts18xx_utilities_gui.json"
