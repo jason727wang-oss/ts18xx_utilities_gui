@@ -1,2 +1,3 @@
 # SPDM Log Paser 解析時存下來的憑證
 *.pem
+*.der
