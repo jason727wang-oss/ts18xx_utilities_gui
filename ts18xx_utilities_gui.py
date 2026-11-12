@@ -34,6 +34,8 @@ TFLX_DEFAULT_IMG = r"C:\Users\jason\.trustplatform\ts18xx_tools_assets_1.0.0rc5\
 
 # SPDM Log Paser 分頁的預設路徑(在 PATH 內時直接用檔名即可)
 SPDM_DEFAULT_EXE = "ts18xx_spdm.exe"
+SPDM_IFACES = ("i2c", "spi", "i3c")
+SPDM_VERSIONS = ("1.1", "1.4")
 
 
 def _stream_env():
@@ -372,13 +374,24 @@ class SpdmLogTab(ttk.Frame):
         self.proc = None
         self.out_q = queue.Queue()
         self._cr_pending = False
-        v = saved.get("spdm_exe")
+
+        def pick(key, default, allowed=None):
+            v = saved.get(key)
+            if isinstance(v, str) and v and (allowed is None or v in allowed):
+                return v
+            return default
+
         self.vars = {
-            "exe": tk.StringVar(value=v if isinstance(v, str) and v else SPDM_DEFAULT_EXE),
+            "exe": tk.StringVar(value=pick("spdm_exe", SPDM_DEFAULT_EXE)),
+            "iface": tk.StringVar(value=pick("spdm_iface", "spi", SPDM_IFACES)),
+            "port": tk.StringVar(value=pick("spdm_port", "0")),
+            "slot": tk.StringVar(value=pick("spdm_slot", "0")),
+            "version": tk.StringVar(value=pick("spdm_version", "1.4", SPDM_VERSIONS)),
         }
         self._build_ui()
         for var in self.vars.values():
-            var.trace_add("write", lambda *_: self.on_change())
+            var.trace_add("write", lambda *_: (self._update_preview(), self.on_change()))
+        self._update_preview()
         self.after(100, self._poll_output)
 
     def _build_ui(self):
@@ -392,9 +405,38 @@ class SpdmLogTab(ttk.Frame):
         ttk.Entry(f, textvariable=self.vars["exe"]).grid(row=0, column=1, sticky="ew", **pad)
         ttk.Button(f, text="選擇…", command=self._browse_exe).grid(row=0, column=2, **pad)
 
-        ttk.Label(self, foreground="gray",
-                  text="固定參數:--iface_type spi  --port 0  --slot_index 0  --spdm_version 1.4").pack(
-            anchor="w", padx=14, pady=(0, 2))
+        # 選項
+        f_opt = ttk.LabelFrame(self, text="選項")
+        f_opt.pack(fill="x", padx=10, pady=4)
+
+        ttk.Label(f_opt, text="Interface").grid(row=0, column=0, sticky="e", **pad)
+        f_if = ttk.Frame(f_opt)
+        f_if.grid(row=0, column=1, sticky="w", **pad)
+        for val, label in (("i2c", "I2C"), ("spi", "SPI"), ("i3c", "I3C")):
+            ttk.Radiobutton(f_if, text=label, value=val,
+                            variable=self.vars["iface"]).pack(side="left", padx=(0, 10))
+
+        ttk.Label(f_opt, text="SPT Channel").grid(row=0, column=2, sticky="e", padx=(24, 6), pady=5)
+        ttk.Entry(f_opt, textvariable=self.vars["port"], width=6).grid(
+            row=0, column=3, sticky="w", **pad)
+
+        ttk.Label(f_opt, text="Cert Chain Slot (0–7)").grid(row=1, column=0, sticky="e", **pad)
+        ttk.Spinbox(f_opt, from_=0, to=7, width=6, textvariable=self.vars["slot"]).grid(
+            row=1, column=1, sticky="w", **pad)
+
+        ttk.Label(f_opt, text="SPDM Version").grid(row=1, column=2, sticky="e", padx=(24, 6), pady=5)
+        f_ver = ttk.Frame(f_opt)
+        f_ver.grid(row=1, column=3, sticky="w", **pad)
+        for val in SPDM_VERSIONS:
+            ttk.Radiobutton(f_ver, text=val, value=val,
+                            variable=self.vars["version"]).pack(side="left", padx=(0, 10))
+
+        # 指令預覽
+        f_prev = ttk.LabelFrame(self, text="對應的指令")
+        f_prev.pack(fill="x", padx=10, pady=4)
+        self.preview = tk.Text(f_prev, height=2, wrap="word", state="disabled",
+                               background=self.winfo_toplevel().cget("background"), relief="flat")
+        self.preview.pack(fill="x", padx=6, pady=4)
 
         # 按鈕
         f_btn = ttk.Frame(self)
@@ -435,8 +477,16 @@ class SpdmLogTab(ttk.Frame):
     # ---------- 指令組合 ----------
     def build_cmd(self):
         return [self.vars["exe"].get().strip(),
-                "--iface_type", "spi", "--port", "0",
-                "--slot_index", "0", "--spdm_version", "1.4"]
+                "--iface_type", self.vars["iface"].get(),
+                "--port", self.vars["port"].get().strip(),
+                "--slot_index", self.vars["slot"].get().strip(),
+                "--spdm_version", self.vars["version"].get()]
+
+    def _update_preview(self):
+        self.preview.configure(state="normal")
+        self.preview.delete("1.0", "end")
+        self.preview.insert("1.0", subprocess.list2cmdline(self.build_cmd()))
+        self.preview.configure(state="disabled")
 
     # ---------- 執行 ----------
     def _set_running(self, running):
@@ -448,6 +498,13 @@ class SpdmLogTab(ttk.Frame):
             return
         if not self.vars["exe"].get().strip():
             messagebox.showwarning("缺少參數", "請先填入 ts18xx_spdm.exe 的路徑。")
+            return
+        if not re.fullmatch(r"[0-9]+", self.vars["port"].get().strip()):
+            messagebox.showerror("參數錯誤", "SPT Channel 必須是非負整數。")
+            return
+        slot = self.vars["slot"].get().strip()
+        if not re.fullmatch(r"[0-9]+", slot) or int(slot) > 7:
+            messagebox.showerror("參數錯誤", "Cert Chain Slot 必須是 0–7 的整數。")
             return
 
         cmd = self.build_cmd()
@@ -973,7 +1030,8 @@ class FlashGui(tk.Tk):
             data["tflx_img"] = tflx.vars["img"].get()
         spdm = getattr(self, "spdm", None)
         if spdm is not None:
-            data["spdm_exe"] = spdm.vars["exe"].get()
+            for k in ("exe", "iface", "port", "slot", "version"):
+                data[f"spdm_{k}"] = spdm.vars[k].get()
         try:
             SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError:
