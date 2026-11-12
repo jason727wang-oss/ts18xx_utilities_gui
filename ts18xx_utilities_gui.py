@@ -382,7 +382,12 @@ class FlashGui(tk.Tk):
         self.sel = {c: tk.BooleanVar(value=(c == (0, 0))) for c in COMBOS}
         self._load_settings()
 
-        # 分頁
+        # 分頁:選中的分頁字體加大加粗
+        style = ttk.Style(self)
+        style.configure("TNotebook.Tab", padding=(12, 4))
+        style.map("TNotebook.Tab",
+                  font=[("selected", ("", 12, "bold"))],
+                  padding=[("selected", (14, 6))])
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True)
         tab_flash = ttk.Frame(self.nb)
