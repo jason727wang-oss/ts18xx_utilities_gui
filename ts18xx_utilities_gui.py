@@ -38,8 +38,19 @@ TFLX_DEFAULT_IMG = r"C:\Users\jason\.trustplatform\ts18xx_tools_assets_1.0.0rc5\
 SPDM_DEFAULT_EXE = "ts18xx_spdm.exe"
 SPDM_IFACES = ("i2c", "spi", "i3c")
 SPDM_VERSIONS = ("1.1", "1.4")
-# 解析時把憑證存成 .pem 的預設資料夾
-SPDM_DEFAULT_PEM_DIR = os.path.join(os.path.expanduser("~"), "ts18xx_spdm_certs")
+# 解析時把憑證存成 .pem 的預設資料夾:跟這支 .py 檔放在同一個資料夾
+SPDM_DEFAULT_PEM_DIR = os.path.dirname(os.path.abspath(__file__))
+# 舊版的預設資料夾(使用者家目錄底下),設定檔裡還存著它的話會改用新的預設
+SPDM_OLD_PEM_DIR = os.path.join(os.path.expanduser("~"), "ts18xx_spdm_certs")
+
+
+def _spdm_initial_pem_dir(saved_value):
+    if isinstance(saved_value, str) and saved_value.strip():
+        def norm(p):
+            return os.path.normcase(os.path.normpath(p))
+        if norm(saved_value) != norm(SPDM_OLD_PEM_DIR):
+            return saved_value
+    return SPDM_DEFAULT_PEM_DIR
 
 
 def _stream_env():
@@ -764,7 +775,7 @@ class SpdmLogTab(ttk.Frame):
             "port": tk.StringVar(value=pick("spdm_port", "0")),
             "slot": tk.StringVar(value=pick("spdm_slot", "0")),
             "version": tk.StringVar(value=pick("spdm_version", "1.4", SPDM_VERSIONS)),
-            "pem_dir": tk.StringVar(value=pick("spdm_pem_dir", SPDM_DEFAULT_PEM_DIR)),
+            "pem_dir": tk.StringVar(value=_spdm_initial_pem_dir(saved.get("spdm_pem_dir"))),
             "save_pem": tk.BooleanVar(
                 value=saved["spdm_save_pem"] if isinstance(saved.get("spdm_save_pem"), bool) else True),
         }
