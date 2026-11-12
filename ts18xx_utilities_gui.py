@@ -365,14 +365,187 @@ class TflxProvTab(ttk.Frame):
         self.log.configure(state="disabled")
 
 
+# ts18xx_spdm 的輸出行:[INFO 2026-11-12 10:49:53,262 tpds.ts18xx_utilities.spdm] 訊息
+_SPDM_LINE_RE = re.compile(r"^\[(\w+) [0-9-]+ [0-9:,]+ [^\]]*\] ?(.*)$")
+_SPDM_MEAS_RE = re.compile(
+    r"MeasurementBlockIndex: 0x([0-9A-Fa-f]+), MeasurementType: (.+?), "
+    r"MeasurementValue 0x([0-9A-Fa-f]+) bytes: ([0-9A-Fa-f]*)")
+
+
+def _spdm_mark(msg):
+    """依訊息文字判斷是 ✔ / ✘ / 一般資訊,回傳 (符號, tag)。"""
+    low = msg.lower()
+    if re.search(r"fail|error|mismatch|invalid|not verified", low):
+        return "✘", "err"
+    if "successful" in low or "verified" in low:
+        return "✔", "ok"
+    return " ", None
+
+
+def _spdm_ascii(hexv):
+    """hex 內容全是可見 ASCII 字元(例如版本字串)時,回傳對應文字,否則回傳空字串。"""
+    try:
+        raw = bytes.fromhex(hexv)
+    except ValueError:
+        return ""
+    if len(raw) >= 3 and all(32 <= b < 127 for b in raw):
+        return raw.decode("ascii")
+    return ""
+
+
+def parse_spdm_output(text, code):
+    """把 ts18xx_spdm 的輸出整理成 [(文字, tag), ...];tag 為 None / hdr / ok / err。"""
+    entries = []  # [等級, 訊息];沒有時間戳記的行(例如 hex dump)接在上一筆後面
+    for raw in text.splitlines():
+        m = _SPDM_LINE_RE.match(raw)
+        if m:
+            entries.append([m.group(1), m.group(2)])
+        elif entries and raw.strip():
+            entries[-1][1] += "\n" + raw
+    if not entries:
+        return [("輸出中沒有可解析的 SPDM 紀錄。\n", "err")]
+    msgs = [e[1] for e in entries]
+
+    def find(pattern):
+        for msg in msgs:
+            m = re.search(pattern, msg)
+            if m:
+                return m
+        return None
+
+    def verdict(pattern):
+        m = find(pattern)
+        return None if m is None else _spdm_mark(m.group(0))[0] == "✔"
+
+    # --- 連線資訊 ---
+    rows_conn = []
+    m = find(r"SPDM Interface Type: (\w+), Certificate Chain Slot index: (\d+), "
+             r"Host Device Address: (\d+)")
+    if m:
+        rows_conn += [(f"Interface: {m.group(1).upper()}", None),
+                      (f"Cert Chain Slot: {m.group(2)}", None),
+                      (f"Host Device Address: {m.group(3)}", None)]
+    m = find(r"SPI Mode: (\S+)")
+    if m:
+        rows_conn.append((f"SPI Mode: {m.group(1)}", None))
+    m = find(r"Responder DataTransferSize: (\d+), MaxSPDMmsgSize: (\d+), "
+             r"CHUNK_CAP flag: (\w+), Chunking enabled: (\w+)")
+    if m:
+        rows_conn += [(f"Responder DataTransferSize: {m.group(1)} bytes", None),
+                      (f"Responder MaxSPDMmsgSize: {m.group(2)} bytes", None),
+                      (f"Chunking: CAP {m.group(3)}, enabled {m.group(4)}", None)]
+
+    # --- 憑證 ---
+    rows_cert = []
+    m = find(r"CERT_SIZE: slot (\d+) total_length=(\d+)")
+    if m:
+        rows_cert.append((f"Slot {m.group(1)} 憑證鏈總長度: {int(m.group(2))} bytes", None))
+    cert_ok = []
+    for msg in msgs:
+        m = re.match(r"cert(\d+)[: ]\s*(.*)", msg)
+        if m:
+            sym, tag = _spdm_mark(msg)
+            rows_cert.append((f"{sym} cert{m.group(1)}: {m.group(2)}", tag))
+            if "verification" in msg.lower():
+                cert_ok.append(sym == "✔")
+    m = find(r"Root Certificate Hash: ([0-9A-Fa-f]+)")
+    if m:
+        rows_cert.append((f"  Root Certificate Hash: {m.group(1)}", None))
+    for pattern in (r"Root Certificate Hash Digest.*", r"Cert Chain Digest: ([0-9A-Fa-f]+)",
+                    r"Cert Chain Digest \w.*"):
+        m = find(pattern)
+        if m:
+            sym, tag = _spdm_mark(m.group(0))
+            rows_cert.append((f"{sym} {m.group(0)}", tag))
+
+    # --- 簽章 ---
+    rows_sig = []
+    for pattern in (r"Challenge Signature Verification.*",
+                    r"Measurements Signature Verification.*"):
+        m = find(pattern)
+        if m:
+            sym, tag = _spdm_mark(m.group(0))
+            rows_sig.append((f"{sym} {m.group(0)}", tag))
+
+    # --- 量測區塊(同一個 index 以第一次出現的為準,也就是單獨讀取的那一筆) ---
+    blocks = {}
+    for msg in msgs:
+        for m in _SPDM_MEAS_RE.finditer(msg):
+            blocks.setdefault(int(m.group(1), 16), (m.group(2), int(m.group(3), 16), m.group(4)))
+    rows_meas = []
+    m = find(r"Measurement blocks reported: \[([0-9, ]*)\]")
+    if m:
+        rows_meas.append((f"回報的區塊: {m.group(1)}", None))
+    for idx in sorted(blocks):
+        typ, size, hexv = blocks[idx]
+        if hexv and set(hexv) <= {"0"}:
+            val = "(全為 0)"
+        elif len(hexv) > 96:
+            val = hexv[:96] + "…"
+        else:
+            val = hexv
+        ascii_text = _spdm_ascii(hexv)
+        if ascii_text:
+            val += f'  (ASCII: "{ascii_text}")'
+        rows_meas.append((f"Block {idx:>2}  {typ}  ({size} bytes)", None))
+        rows_meas.append((f"    {val}", None))
+
+    # --- 其他資訊(BMC / GPIO 量測) ---
+    rows_extra = [(msg, None) for msg in msgs
+                  if re.match(r"(INDEX\d+|BMC measurement|\s*secure_gpio|\s*attest_gpio_in)", msg)]
+
+    # --- 驗證項目與整體結果 ---
+    checks = [
+        ("Root Certificate Hash Digest", verdict(r"Root Certificate Hash Digest.*")),
+        ("Cert Chain Digest", verdict(r"Cert Chain Digest \w.*")),
+        ("憑證鏈 ECDSA 驗證", (all(cert_ok) if cert_ok else None)),
+        ("Challenge 簽章驗證", verdict(r"Challenge Signature Verification.*")),
+        ("Measurements 簽章驗證", verdict(r"Measurements Signature Verification.*")),
+    ]
+    problems = [msg for level, msg in entries if level in ("WARNING", "ERROR", "CRITICAL")]
+    if "Traceback" in text:
+        problems.append("輸出包含 Python Traceback")
+    failed = code != 0 or bool(problems) or any(state is False for _, state in checks)
+
+    if failed:
+        head = ("整體結果: FAIL", "err")
+    elif all(state for _, state in checks):
+        head = ("整體結果: PASS", "ok")
+    else:
+        head = ("整體結果: 執行完成,但部分驗證項目沒有出現在輸出中", "hdr")
+    out = [(head[0] + "\n\n", head[1])]
+
+    def section(title, rows):
+        if not rows:
+            return
+        out.append((f"■ {title}\n", "hdr"))
+        for line, tag in rows:
+            for sub in line.split("\n"):
+                out.append((f"  {sub}\n", tag))
+        out.append(("\n", None))
+
+    section("驗證項目", [
+        (f"{'✔' if st else ('✘' if st is False else '—')} {label}",
+         "ok" if st else ("err" if st is False else None))
+        for label, st in checks])
+    section("警告 / 錯誤", [(msg, "err") for msg in problems])
+    section("連線資訊", rows_conn)
+    section("憑證", rows_cert)
+    section("簽章", rows_sig)
+    section("量測區塊", rows_meas)
+    section("其他資訊", rows_extra)
+    return out
+
+
 class SpdmLogTab(ttk.Frame):
-    """SPDM Log Paser 分頁:目前只有 ts18xx_spdm.exe 的路徑欄位"""
+    """SPDM Log Paser 分頁:執行 ts18xx_spdm,上方顯示原始輸出,下方顯示解析後的結果"""
 
     def __init__(self, parent, saved, on_change):
         super().__init__(parent)
         self.on_change = on_change
         self.proc = None
         self.out_q = queue.Queue()
+        self.captured = []
         self._cr_pending = False
 
         def pick(key, default, allowed=None):
@@ -452,21 +625,30 @@ class SpdmLogTab(ttk.Frame):
         self.status = tk.StringVar(value="就緒")
         ttk.Label(f_btn, textvariable=self.status).pack(side="right")
 
-        # 輸出
-        f_log = ttk.LabelFrame(self, text="輸出")
-        f_log.pack(fill="both", expand=True, padx=10, pady=(4, 10))
-        f_log.rowconfigure(0, weight=1)
-        f_log.columnconfigure(0, weight=1)
-        self.log = tk.Text(f_log, wrap="none", state="disabled", font=("Consolas", 10))
-        ys = ttk.Scrollbar(f_log, orient="vertical", command=self.log.yview)
-        xs = ttk.Scrollbar(f_log, orient="horizontal", command=self.log.xview)
-        self.log.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
-        self.log.grid(row=0, column=0, sticky="nsew")
-        ys.grid(row=0, column=1, sticky="ns")
-        xs.grid(row=1, column=0, sticky="ew")
-        self.log.tag_configure("err", foreground="#c0392b")
-        self.log.tag_configure("ok", foreground="#1e8449")
-        self.log.tag_configure("info", foreground="#2471a3")
+        # 輸出與解析結果:上下兩個視窗,可拖曳中間的分隔線調整大小
+        pw = ttk.PanedWindow(self, orient="vertical")
+        pw.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+
+        def make_text(title):
+            fr = ttk.LabelFrame(pw, text=title)
+            fr.rowconfigure(0, weight=1)
+            fr.columnconfigure(0, weight=1)
+            txt = tk.Text(fr, wrap="none", state="disabled", font=("Consolas", 10))
+            ys = ttk.Scrollbar(fr, orient="vertical", command=txt.yview)
+            xs = ttk.Scrollbar(fr, orient="horizontal", command=txt.xview)
+            txt.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+            txt.grid(row=0, column=0, sticky="nsew")
+            ys.grid(row=0, column=1, sticky="ns")
+            xs.grid(row=1, column=0, sticky="ew")
+            txt.tag_configure("err", foreground="#c0392b")
+            txt.tag_configure("ok", foreground="#1e8449")
+            txt.tag_configure("info", foreground="#2471a3")
+            txt.tag_configure("hdr", font=("Consolas", 10, "bold"))
+            pw.add(fr, weight=1)
+            return txt
+
+        self.log = make_text("輸出")
+        self.parsed = make_text("解析結果")
 
     def _browse_exe(self):
         init = os.path.dirname(self.vars["exe"].get()) or None
@@ -528,6 +710,8 @@ class SpdmLogTab(ttk.Frame):
             return
 
         cmd = self.build_cmd()
+        self.captured = []
+        self._clear_parsed()
         self._append("\n===== SPDM Run =====\n", "info")
         self._i2c_hint()
         self._append(f"> {subprocess.list2cmdline(cmd)}\n", "info")
@@ -570,6 +754,7 @@ class SpdmLogTab(ttk.Frame):
             while True:
                 kind, data = self.out_q.get_nowait()
                 if kind == "data":
+                    self.captured.append(data)
                     self._append_stream(data)
                 else:
                     self._finish(data)
@@ -580,6 +765,7 @@ class SpdmLogTab(ttk.Frame):
     def _finish(self, code):
         self.proc = None
         self._end_stream_line()
+        self._show_parsed("".join(self.captured), code)
         if code == 0:
             self._append("[完成] 結束碼 0\n", "ok")
             self.status.set("完成")
@@ -635,6 +821,28 @@ class SpdmLogTab(ttk.Frame):
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
+        self._clear_parsed()
+
+    def _clear_parsed(self):
+        self.parsed.configure(state="normal")
+        self.parsed.delete("1.0", "end")
+        self.parsed.configure(state="disabled")
+
+    def _show_parsed(self, text, code):
+        """工具執行結束後,把輸出整理到「解析結果」視窗。"""
+        try:
+            rows = parse_spdm_output(text, code)
+        except Exception as e:
+            rows = [(f"解析失敗:{e}\n", "err")]
+        self.parsed.configure(state="normal")
+        self.parsed.delete("1.0", "end")
+        for line, tag in rows:
+            if tag:
+                self.parsed.insert("end", line, tag)
+            else:
+                self.parsed.insert("end", line)
+        self.parsed.see("1.0")
+        self.parsed.configure(state="disabled")
 
 
 class FlashGui(tk.Tk):
