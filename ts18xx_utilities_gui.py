@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
@@ -27,7 +28,11 @@ COMBOS = [(fi, cs) for fi in (0, 1, 2) for cs in (0, 1)]
 DEFAULTS = {
     "exe": "ts18xx_ftdi_flash",
     "bin_dir": "",
+    "speed": "12",
+    "bus_width": "single",
 }
+FLASH_SPEEDS = ("12", "15", "20", "40")          # --speed (MHz)
+FLASH_BUS_WIDTHS = ("single", "dual", "quad")    # --bus_width
 
 # TFLX Provisioning 分頁的預設路徑
 TFLX_DEFAULT_EXE = r"C:\Users\jason\tpds\2.3.9_ts18xx_v100\Scripts\ts18xx_tflx_prov.exe"
@@ -1102,6 +1107,14 @@ class SpdmLogTab(ttk.Frame):
         return rows
 
 
+def _fmt_secs(sec):
+    """秒數轉成易讀格式:12.3 s 或 1 min 05.2 s"""
+    if sec < 60:
+        return f"{sec:.1f} s"
+    m, s = divmod(sec, 60)
+    return f"{int(m)} min {s:04.1f} s"
+
+
 class FlashGui(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -1123,6 +1136,10 @@ class FlashGui(tk.Tk):
         self._raw = {}
         self.vars = {k: tk.StringVar(value=v) for k, v in DEFAULTS.items()}
         self.sel = {c: tk.BooleanVar(value=(c == (0, 0))) for c in COMBOS}
+        self.verify = tk.BooleanVar(value=False)   # --verify
+        self.smart = tk.BooleanVar(value=False)    # --smart
+        self.job_start = None                      # 目前項目的開始時間
+        self.job_times = {}                        # {(fi, cs): 秒}
         self._load_settings()
 
         # 分頁:選中的分頁字體加大加粗
@@ -1141,7 +1158,7 @@ class FlashGui(tk.Tk):
         self.spdm = SpdmLogTab(self.nb, self._raw, self._save_settings)
         self.nb.add(self.spdm, text="SPDM Log Paser")
 
-        for v in list(self.vars.values()) + list(self.sel.values()):
+        for v in list(self.vars.values()) + list(self.sel.values()) + [self.verify, self.smart]:
             v.trace_add("write", lambda *_: (self._update_preview(), self._save_settings()))
         self._update_preview()
         self.after(100, self._poll_output)
@@ -1190,8 +1207,24 @@ class FlashGui(tk.Tk):
         self.btn_none = ttk.Button(f_selbtn, text="全不選", command=lambda: self._set_all(False))
         self.btn_none.pack(side="left", padx=(6, 0))
 
+        # SPI 參數
+        f_opt = ttk.LabelFrame(root, text="燒錄參數")
+        f_opt.pack(fill="x", padx=10, pady=4)
+        ttk.Label(f_opt, text="SPI Speed (MHz) --speed").grid(row=0, column=0, sticky="w", padx=(10, 6), pady=(6, 0))
+        ttk.Label(f_opt, text="Bus Width --bus_width").grid(row=0, column=1, sticky="w", padx=6, pady=(6, 0))
+        self.cb_speed = ttk.Combobox(f_opt, textvariable=self.vars["speed"], values=FLASH_SPEEDS,
+                                     state="readonly", width=12)
+        self.cb_speed.grid(row=1, column=0, sticky="w", padx=(10, 6), pady=(2, 6))
+        self.cb_bus = ttk.Combobox(f_opt, textvariable=self.vars["bus_width"], values=FLASH_BUS_WIDTHS,
+                                   state="readonly", width=12)
+        self.cb_bus.grid(row=1, column=1, sticky="w", padx=6, pady=(2, 6))
+        self.chk_verify = ttk.Checkbutton(f_opt, text="Verify (--verify)", variable=self.verify)
+        self.chk_verify.grid(row=1, column=2, sticky="w", padx=(20, 6), pady=(2, 6))
+        self.chk_smart = ttk.Checkbutton(f_opt, text="Smart (only changed sectors) (--smart)", variable=self.smart)
+        self.chk_smart.grid(row=1, column=3, sticky="w", padx=6, pady=(2, 6))
+
         ttk.Label(root, foreground="gray",
-                  text="固定參數:--target ext  --speed 12  --spi_mode 0  --bus_width single  program"
+                  text="固定參數:--target ext  --spi_mode 0  program"
                   ).pack(anchor="w", padx=14, pady=(0, 2))
 
         # 指令預覽
@@ -1254,8 +1287,10 @@ class FlashGui(tk.Tk):
         self.btn_run.configure(state="disabled" if running else "normal")
         self.btn_stop.configure(state="normal" if running else "disabled")
         state = "disabled" if running else "normal"
-        for w in self.chks + [self.btn_all, self.btn_none]:
+        for w in self.chks + [self.btn_all, self.btn_none, self.chk_verify, self.chk_smart]:
             w.configure(state=state)
+        for w in (self.cb_speed, self.cb_bus):
+            w.configure(state="disabled" if running else "readonly")
 
     # ---------- 指令組合 ----------
     def selected_combos(self):
@@ -1270,10 +1305,16 @@ class FlashGui(tk.Tk):
         return str(Path(d) / self.bin_name(fi, cs)) if d else self.bin_name(fi, cs)
 
     def build_cmd(self, fi, cs):
-        return [self.vars["exe"].get().strip(),
-                "--target", "ext", "--flash_index", str(fi),
-                "--speed", "12", "--spi_mode", "0", "--bus_width", "single",
-                SUBCOMMAND, "--bin", self.bin_path(fi, cs), "--cs", str(cs)]
+        cmd = [self.vars["exe"].get().strip(),
+               "--target", "ext", "--flash_index", str(fi),
+               "--speed", self.vars["speed"].get(), "--spi_mode", "0",
+               "--bus_width", self.vars["bus_width"].get(),
+               SUBCOMMAND, "--bin", self.bin_path(fi, cs), "--cs", str(cs)]
+        if self.verify.get():
+            cmd.append("--verify")
+        if self.smart.get():
+            cmd.append("--smart")
+        return cmd
 
     def all_cmdlines(self):
         return [subprocess.list2cmdline(self.build_cmd(fi, cs)) for fi, cs in self.selected_combos()]
@@ -1340,6 +1381,7 @@ class FlashGui(tk.Tk):
         self.jobs = list(combos)
         self.job_total = len(combos)
         self.job_results = []
+        self.job_times = {}
         self.cancelled = False
         self._set_running(True)
         self._next_job()
@@ -1354,6 +1396,7 @@ class FlashGui(tk.Tk):
         self.status.set(f"燒錄中 ({idx}/{self.job_total}):flash {fi} / cs {cs}")
 
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        self.job_start = time.monotonic()
         try:
             self.proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -1401,10 +1444,14 @@ class FlashGui(tk.Tk):
         self._end_stream_line()
         ok = (code == 0)
         self.job_results.append((self.cur, ok, code))
+        elapsed = time.monotonic() - self.job_start if self.job_start else None
+        if elapsed is not None:
+            self.job_times[self.cur] = elapsed
+        t = f",耗時 {_fmt_secs(elapsed)}" if elapsed is not None else ""
         if ok:
-            self._append("[完成] 結束碼 0\n", "ok")
+            self._append(f"[完成] 結束碼 0{t}\n", "ok")
         else:
-            self._append(f"[失敗] 結束碼 {code}\n", "err")
+            self._append(f"[失敗] 結束碼 {code}{t}\n", "err")
         if ok and not self.cancelled and self.jobs:
             self._next_job()
         else:
@@ -1419,10 +1466,14 @@ class FlashGui(tk.Tk):
 
         lines = ["", "===== 結果 ====="]
         for (fi, cs), ok, code in self.job_results:
-            lines.append(f"✔ flash {fi} / cs {cs}" if ok
-                         else f"✘ flash {fi} / cs {cs}(結束碼 {code})")
+            t = self.job_times.get((fi, cs))
+            ts = f"  耗時 {_fmt_secs(t)}" if t is not None else ""
+            lines.append(f"✔ flash {fi} / cs {cs}{ts}" if ok
+                         else f"✘ flash {fi} / cs {cs}(結束碼 {code}){ts}")
         for fi, cs in skipped:
             lines.append(f"- flash {fi} / cs {cs}(未執行)")
+        if self.job_times:
+            lines.append(f"總耗時 {_fmt_secs(sum(self.job_times.values()))}")
         all_ok = not failed and not skipped
         self._append("\n".join(lines) + "\n", "ok" if all_ok else "err")
 
@@ -1497,6 +1548,12 @@ class FlashGui(tk.Tk):
         for k in DEFAULTS:
             if isinstance(data.get(k), str):
                 self.vars[k].set(data[k])
+        if self.vars["speed"].get() not in FLASH_SPEEDS:
+            self.vars["speed"].set(DEFAULTS["speed"])
+        if self.vars["bus_width"].get() not in FLASH_BUS_WIDTHS:
+            self.vars["bus_width"].set(DEFAULTS["bus_width"])
+        self.verify.set(bool(data.get("verify", False)))
+        self.smart.set(bool(data.get("smart", False)))
 
         # 勾選狀態;舊版只有單一 flash_index / cs,就轉成只勾那一個
         selected = data.get("selected")
@@ -1510,6 +1567,8 @@ class FlashGui(tk.Tk):
     def _save_settings(self):
         data = {k: v.get() for k, v in self.vars.items()}
         data["selected"] = [f"{fi},{cs}" for (fi, cs) in COMBOS if self.sel[(fi, cs)].get()]
+        data["verify"] = self.verify.get()
+        data["smart"] = self.smart.get()
         tflx = getattr(self, "tflx", None)
         if tflx is not None:
             data["tflx_exe"] = tflx.vars["exe"].get()
