@@ -1,3 +1,4 @@
+import base64
 import codecs
 import hashlib
 import json
@@ -37,6 +38,8 @@ TFLX_DEFAULT_IMG = r"C:\Users\jason\.trustplatform\ts18xx_tools_assets_1.0.0rc5\
 SPDM_DEFAULT_EXE = "ts18xx_spdm.exe"
 SPDM_IFACES = ("i2c", "spi", "i3c")
 SPDM_VERSIONS = ("1.1", "1.4")
+# 解析時把憑證存成 .pem 的預設資料夾
+SPDM_DEFAULT_PEM_DIR = os.path.join(os.path.expanduser("~"), "ts18xx_spdm_certs")
 
 
 def _stream_env():
@@ -474,8 +477,12 @@ def _x509_summary(der):
         return {}
 
 
-def _spdm_chain_rows(rsp_hex, digest_hex):
-    """解析 Get Certificate 的回應,回傳「憑證鏈結構」的說明與實際資料(顯示列)。"""
+def _spdm_split_chain(rsp_hex, digest_hex):
+    """切開 Get Certificate 回應裡的憑證鏈。
+
+    回傳 (chain, hsize, certs, complete):chain 是憑證鏈結構本身,hsize 是 RootHash 的長度
+    (找不到時為 None),certs 是 [(offset, DER bytes), ...],complete 表示資料完整、沒有被截斷。
+    """
     rsp = bytes.fromhex(rsp_hex)
     portion = int.from_bytes(rsp[4:6], "little")      # 回應檔頭 8 bytes:版本、代碼、Param1/2、兩個長度
     chain = rsp[8:8 + portion]
@@ -484,6 +491,44 @@ def _spdm_chain_rows(rsp_hex, digest_hex):
         if cand in _HASH_ALGOS and len(chain) > 4 + cand and chain[4 + cand] == 0x30:
             hsize = cand
             break
+    if hsize is None:
+        return chain, None, [], True
+    certs = []
+    complete = len(chain) >= int.from_bytes(chain[0:2], "little")
+    pos = 4 + hsize
+    try:
+        while pos + 4 <= len(chain) and chain[pos] == 0x30:
+            _, _, end = _der_read(chain, pos)
+            if end > len(chain):
+                complete = False
+                break
+            certs.append((pos, chain[pos:end]))
+            pos = end
+    except IndexError:
+        complete = False
+    return chain, hsize, certs, complete
+
+
+def extract_spdm_certs(text):
+    """從 ts18xx_spdm 的輸出取出憑證鏈裡每張憑證的 DER,回傳 [bytes, ...];找不到就回傳空 list。"""
+    m = re.search(r"Name: Get All Certs, WriteBytes: [0-9A-Fa-f]*, ReadBytes: ([0-9A-Fa-f]+)", text)
+    if not m:
+        return []
+    d = re.search(r"Cert Chain Digest: ([0-9A-Fa-f]+)", text)
+    _, _, certs, _ = _spdm_split_chain(m.group(1), d.group(1) if d else "")
+    return [der for _, der in certs]
+
+
+def der_to_pem(der):
+    """DER 憑證轉成 PEM 文字(Base64,每行 64 個字元)。"""
+    b64 = base64.b64encode(der).decode("ascii")
+    body = "\n".join(b64[i:i + 64] for i in range(0, len(b64), 64))
+    return f"-----BEGIN CERTIFICATE-----\n{body}\n-----END CERTIFICATE-----\n"
+
+
+def _spdm_chain_rows(rsp_hex, digest_hex):
+    """解析 Get Certificate 的回應,回傳「憑證鏈結構」的說明與實際資料(顯示列)。"""
+    chain, hsize, certs, complete = _spdm_split_chain(rsp_hex, digest_hex)
     if hsize is None:
         return []
     algo, algo_name = _HASH_ALGOS[hsize]
@@ -506,30 +551,24 @@ def _spdm_chain_rows(rsp_hex, digest_hex):
         (f"{4:<8}{hsize:<6}{'RootHash':<14}{root_hash.hex().upper()}", None),
     ]
     certs_rows = []
-    pos = 4 + hsize
-    idx = 0
-    try:
-        while pos + 4 <= len(chain) and chain[pos] == 0x30:
-            _, _, end = _der_read(chain, pos)
-            der = chain[pos:end]
-            info = _x509_summary(der)
-            certs_rows.append((f"cert{idx}  offset {pos}  {len(der)} bytes"
-                               + ("  (根憑證)" if idx == 0 else ""), None))
-            if info:
-                certs_rows += [(f"    Subject:  {info['subject']}", None),
-                               (f"    Issuer:   {info['issuer']}", None),
-                               (f"    Validity: {info['not_before']} ~ {info['not_after']}", None)]
-            if idx == 0:
-                h = hashlib.new(algo, der).digest()
-                ok = h == root_hash
-                certs_rows.append((f"    {algo_name}(cert0) = {h.hex().upper()}", None))
-                certs_rows.append((f"    {'✔' if ok else '✘'} 與 RootHash {'相符' if ok else '不相符'}",
-                                   "ok" if ok else "err"))
-            pos = end
-            idx += 1
-    except IndexError:
+    for idx, (pos, der) in enumerate(certs):
+        info = _x509_summary(der)
+        h = hashlib.new(algo, der).digest()
+        certs_rows.append((f"cert{idx}  offset {pos}  {len(der)} bytes"
+                           + ("  (根憑證)" if idx == 0 else ""), None))
+        if info:
+            certs_rows += [(f"    Subject:  {info['subject']}", None),
+                           (f"    Issuer:   {info['issuer']}", None),
+                           (f"    Validity: {info['not_before']} ~ {info['not_after']}", None)]
+        certs_rows.append((f"    {algo_name}(cert{idx}) = {h.hex().upper()}", None))
+        if idx == 0:  # 根憑證的雜湊要等於憑證鏈檔頭裡的 RootHash
+            ok = h == root_hash
+            certs_rows.append((f"    {'✔' if ok else '✘'} 與 RootHash {'相符' if ok else '不相符'}",
+                               "ok" if ok else "err"))
+    if not complete:
         certs_rows.append(("(憑證資料不完整,後面的憑證無法解析)", "err"))
-    rows.append((f"{4 + hsize:<8}{max(len(chain) - 4 - hsize, 0):<6}{'Certificates':<14}共 {idx} 張", None))
+    rows.append((f"{4 + hsize:<8}{max(len(chain) - 4 - hsize, 0):<6}{'Certificates':<14}"
+                 f"共 {len(certs)} 張", None))
     rows += certs_rows
 
     if digest_hex:
@@ -725,6 +764,9 @@ class SpdmLogTab(ttk.Frame):
             "port": tk.StringVar(value=pick("spdm_port", "0")),
             "slot": tk.StringVar(value=pick("spdm_slot", "0")),
             "version": tk.StringVar(value=pick("spdm_version", "1.4", SPDM_VERSIONS)),
+            "pem_dir": tk.StringVar(value=pick("spdm_pem_dir", SPDM_DEFAULT_PEM_DIR)),
+            "save_pem": tk.BooleanVar(
+                value=saved["spdm_save_pem"] if isinstance(saved.get("spdm_save_pem"), bool) else True),
         }
         self._build_ui()
         for var in self.vars.values():
@@ -745,6 +787,12 @@ class SpdmLogTab(ttk.Frame):
         ttk.Label(f, text="ts18xx_spdm.exe").grid(row=0, column=0, sticky="e", **pad)
         ttk.Entry(f, textvariable=self.vars["exe"]).grid(row=0, column=1, sticky="ew", **pad)
         ttk.Button(f, text="選擇…", command=self._browse_exe).grid(row=0, column=2, **pad)
+
+        ttk.Label(f, text="憑證輸出資料夾").grid(row=1, column=0, sticky="e", **pad)
+        ttk.Entry(f, textvariable=self.vars["pem_dir"]).grid(row=1, column=1, sticky="ew", **pad)
+        ttk.Button(f, text="選擇…", command=self._browse_pem_dir).grid(row=1, column=2, **pad)
+        ttk.Checkbutton(f, text="解析時將憑證存成 cert0.pem、cert1.pem …",
+                        variable=self.vars["save_pem"]).grid(row=2, column=1, sticky="w", **pad)
 
         # 選項
         f_opt = ttk.LabelFrame(self, text="選項")
@@ -823,6 +871,14 @@ class SpdmLogTab(ttk.Frame):
                                        filetypes=[("可執行檔", "*.exe *.bat *.cmd"), ("所有檔案", "*.*")])
         if p:
             self.vars["exe"].set(os.path.normpath(p))
+
+    def _browse_pem_dir(self):
+        init = self.vars["pem_dir"].get().strip() or None
+        if init and not os.path.isdir(init):
+            init = None
+        p = filedialog.askdirectory(title="選擇憑證(.pem)輸出資料夾", initialdir=init)
+        if p:
+            self.vars["pem_dir"].set(os.path.normpath(p))
 
     # ---------- 指令組合 ----------
     def build_cmd(self):
@@ -999,6 +1055,8 @@ class SpdmLogTab(ttk.Frame):
             rows = parse_spdm_output(text, code)
         except Exception as e:
             rows = [(f"解析失敗:{e}\n", "err")]
+        if self.vars["save_pem"].get():
+            rows = rows + self._save_pem_files(text)
         self.parsed.configure(state="normal")
         self.parsed.delete("1.0", "end")
         for line, tag in rows:
@@ -1008,6 +1066,29 @@ class SpdmLogTab(ttk.Frame):
                 self.parsed.insert("end", line)
         self.parsed.see("1.0")
         self.parsed.configure(state="disabled")
+
+    def _save_pem_files(self, text):
+        """把憑證鏈裡的每張憑證存成 cert0.pem、cert1.pem …,回傳要顯示在解析結果裡的列。"""
+        try:
+            ders = extract_spdm_certs(text)
+        except Exception as e:
+            return [("■ 憑證檔案 (.pem)\n", "hdr"), (f"  解析憑證失敗:{e}\n", "err")]
+        if not ders:
+            return []
+        rows = [("■ 憑證檔案 (.pem)\n", "hdr")]
+        folder = self.vars["pem_dir"].get().strip()
+        if not folder:
+            return rows + [("  ✘ 尚未設定憑證輸出資料夾,沒有儲存。\n", "err")]
+        try:
+            os.makedirs(folder, exist_ok=True)
+            for i, der in enumerate(ders):
+                path = os.path.join(folder, f"cert{i}.pem")
+                with open(path, "w", encoding="ascii", newline="\n") as f:
+                    f.write(der_to_pem(der))
+                rows.append((f"  ✔ {path}\n", "ok"))
+        except OSError as e:
+            rows.append((f"  ✘ 儲存失敗:{e}\n", "err"))
+        return rows
 
 
 class FlashGui(tk.Tk):
@@ -1424,7 +1505,7 @@ class FlashGui(tk.Tk):
             data["tflx_img"] = tflx.vars["img"].get()
         spdm = getattr(self, "spdm", None)
         if spdm is not None:
-            for k in ("exe", "iface", "port", "slot", "version"):
+            for k in ("exe", "iface", "port", "slot", "version", "pem_dir", "save_pem"):
                 data[f"spdm_{k}"] = spdm.vars[k].get()
         try:
             SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
