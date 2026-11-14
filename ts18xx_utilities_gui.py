@@ -30,8 +30,10 @@ DEFAULTS = {
     "bin_dir": "",
     "speed": "12",
     "bus_width": "single",
+    "action": "program",
 }
 FLASH_SPEEDS = ("12", "15", "20", "24")          # --speed (MHz)
+FLASH_ACTIONS = ("program", "scan", "set_qe")      # 要執行的子命令
 FLASH_BUS_WIDTHS = ("single", "dual", "quad")    # --bus_width
 
 # TFLX Provisioning 分頁的預設路徑
@@ -1243,7 +1245,11 @@ class FlashGui(tk.Tk):
         # 按鈕
         f_btn = ttk.Frame(root)
         f_btn.pack(fill="x", padx=10, pady=4)
-        self.btn_run = ttk.Button(f_btn, text="▶ 開始燒錄", command=self.run)
+        ttk.Label(f_btn, text="動作").pack(side="left", padx=(0, 4))
+        self.cb_action = ttk.Combobox(f_btn, textvariable=self.vars["action"], values=FLASH_ACTIONS,
+                                      state="readonly", width=9)
+        self.cb_action.pack(side="left", padx=(0, 8))
+        self.btn_run = ttk.Button(f_btn, text="▶ 執行 Cmd", command=self.run)
         self.btn_run.pack(side="left")
         self.btn_stop = ttk.Button(f_btn, text="■ 停止", command=self.stop, state="disabled")
         self.btn_stop.pack(side="left", padx=6)
@@ -1289,7 +1295,7 @@ class FlashGui(tk.Tk):
         state = "disabled" if running else "normal"
         for w in self.chks + [self.btn_all, self.btn_none, self.chk_verify, self.chk_smart]:
             w.configure(state=state)
-        for w in (self.cb_speed, self.cb_bus):
+        for w in (self.cb_speed, self.cb_bus, self.cb_action):
             w.configure(state="disabled" if running else "readonly")
 
     # ---------- 指令組合 ----------
@@ -1304,12 +1310,32 @@ class FlashGui(tk.Tk):
         d = self.vars["bin_dir"].get().strip()
         return str(Path(d) / self.bin_name(fi, cs)) if d else self.bin_name(fi, cs)
 
+    def action(self):
+        a = self.vars["action"].get()
+        return a if a in FLASH_ACTIONS else SUBCOMMAND
+
+    def planned_jobs(self):
+        """program:每個勾選的 (flash_index, cs);scan / set_qe:每個勾選到的 flash_index 各一次(cs 記為 all)。"""
+        combos = self.selected_combos()
+        if self.action() == SUBCOMMAND:
+            return combos
+        fis = []
+        for fi, _cs in combos:
+            if fi not in fis:
+                fis.append(fi)
+        return [(fi, "all") for fi in fis]
+
     def build_cmd(self, fi, cs):
+        act = self.action()
         cmd = [self.vars["exe"].get().strip(),
                "--target", "ext", "--flash_index", str(fi),
                "--speed", self.vars["speed"].get(), "--spi_mode", "0",
-               "--bus_width", self.vars["bus_width"].get(),
-               SUBCOMMAND, "--bin", self.bin_path(fi, cs), "--cs", str(cs)]
+               "--bus_width", self.vars["bus_width"].get()]
+        if act == "scan":
+            return cmd + ["scan"]
+        if act == "set_qe":
+            return cmd + ["set_qe", "--cs", "all"]
+        cmd += [SUBCOMMAND, "--bin", self.bin_path(fi, cs), "--cs", str(cs)]
         if self.verify.get():
             cmd.append("--verify")
         if self.smart.get():
@@ -1317,7 +1343,7 @@ class FlashGui(tk.Tk):
         return cmd
 
     def all_cmdlines(self):
-        return [subprocess.list2cmdline(self.build_cmd(fi, cs)) for fi, cs in self.selected_combos()]
+        return [subprocess.list2cmdline(self.build_cmd(fi, cs)) for fi, cs in self.planned_jobs()]
 
     def _update_bin_status(self):
         has_dir = bool(self.vars["bin_dir"].get().strip())
@@ -1366,14 +1392,17 @@ class FlashGui(tk.Tk):
     def run(self):
         if self.proc is not None or self.jobs:
             return
-        combos = self.selected_combos()
-        if not combos:
-            messagebox.showwarning("尚未勾選", "請至少勾選一個要燒錄的項目。")
+        if not self.selected_combos():
+            messagebox.showwarning("尚未勾選", "請至少勾選一個項目(scan / set_qe 會使用勾選項目的 flash_index)。")
             return
-        if not self.vars["bin_dir"].get().strip():
+        combos = self.planned_jobs()
+        if self.action() != SUBCOMMAND:
+            missing = []
+        elif not self.vars["bin_dir"].get().strip():
             messagebox.showwarning("缺少參數", "請先選擇 spi_image 所在的資料夾。")
             return
-        missing = [self.bin_path(fi, cs) for fi, cs in combos if not Path(self.bin_path(fi, cs)).is_file()]
+        else:
+            missing = [self.bin_path(fi, cs) for fi, cs in combos if not Path(self.bin_path(fi, cs)).is_file()]
         if missing:
             messagebox.showerror("找不到檔案", "資料夾內缺少以下檔案,尚未開始燒錄:\n\n" + "\n".join(missing))
             return
@@ -1393,7 +1422,7 @@ class FlashGui(tk.Tk):
         cmd = self.build_cmd(fi, cs)
         self._append(f"\n===== [{idx}/{self.job_total}] flash_index {fi}, cs {cs} =====\n", "info")
         self._append(f"> {subprocess.list2cmdline(cmd)}\n", "info")
-        self.status.set(f"燒錄中 ({idx}/{self.job_total}):flash {fi} / cs {cs}")
+        self.status.set(f"執行中 ({idx}/{self.job_total}):flash {fi} / cs {cs}")
 
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         self.job_start = time.monotonic()
