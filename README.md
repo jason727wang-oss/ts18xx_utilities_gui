@@ -27,7 +27,7 @@ TS18xx 開發板常用命令列工具的圖形介面（Tkinter）。把 `ts18xx_
   - `program`：燒錄（預設），行為如上。
   - `scan`：執行 `... --bus_width <寬度> scan`，不需要 `.bin` 檔。
   - `set_qe`：執行 `... --bus_width <寬度> set_qe --cs all`，不需要 `.bin` 檔。
-  - `scan` / `set_qe` 會對勾選項目中出現的每個 `--flash_index` 各執行一次（只勾 `flash_index 0` 就只跑 0），`--cs` 勾選與 Verify / Smart 不影響指令；Speed 與 Bus Width 仍然有效。
+  - `scan` / `set_qe` 只會執行上面那一條指令（固定 `--flash_index 0`，執行一次），不受下方勾選項目、Verify、Smart 影響；Speed 與 Bus Width 仍然有效。
 - 每一顆燒錄結束後會顯示該顆的**耗時**，最後的結果列表也會列出各顆耗時與總耗時。耗時是從啟動 `ts18xx_ftdi_flash` 到程序結束的實際時間，包含 erase 與 write；若勾選 Verify，也會包含驗證時間。
 - 固定參數：`--target ext --spi_mode 0 program`
 

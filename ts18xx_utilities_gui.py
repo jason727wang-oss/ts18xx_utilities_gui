@@ -1315,15 +1315,10 @@ class FlashGui(tk.Tk):
         return a if a in FLASH_ACTIONS else SUBCOMMAND
 
     def planned_jobs(self):
-        """program:每個勾選的 (flash_index, cs);scan / set_qe:每個勾選到的 flash_index 各一次(cs 記為 all)。"""
-        combos = self.selected_combos()
+        """program:每個勾選的 (flash_index, cs);scan / set_qe:固定只執行一次(--flash_index 0,cs 記為 all)。"""
         if self.action() == SUBCOMMAND:
-            return combos
-        fis = []
-        for fi, _cs in combos:
-            if fi not in fis:
-                fis.append(fi)
-        return [(fi, "all") for fi in fis]
+            return self.selected_combos()
+        return [(0, "all")]
 
     def build_cmd(self, fi, cs):
         act = self.action()
@@ -1392,8 +1387,8 @@ class FlashGui(tk.Tk):
     def run(self):
         if self.proc is not None or self.jobs:
             return
-        if not self.selected_combos():
-            messagebox.showwarning("尚未勾選", "請至少勾選一個項目(scan / set_qe 會使用勾選項目的 flash_index)。")
+        if self.action() == SUBCOMMAND and not self.selected_combos():
+            messagebox.showwarning("尚未勾選", "請至少勾選一個要燒錄的項目。")
             return
         combos = self.planned_jobs()
         if self.action() != SUBCOMMAND:
