@@ -852,6 +852,8 @@ class SpdmLogTab(ttk.Frame):
         self.btn_run.pack(side="left")
         self.btn_stop = ttk.Button(f_btn, text="■ 停止", command=self.stop, state="disabled")
         self.btn_stop.pack(side="left", padx=6)
+        self.btn_parse = ttk.Button(f_btn, text="解析輸出視窗的 Log", command=self.parse_pasted)
+        self.btn_parse.pack(side="left", padx=(0, 6))
         ttk.Button(f_btn, text="清除輸出", command=self._clear_log).pack(side="left")
         self.status = tk.StringVar(value="就緒")
         ttk.Label(f_btn, textvariable=self.status).pack(side="right")
@@ -878,7 +880,8 @@ class SpdmLogTab(ttk.Frame):
             pw.add(fr, weight=1)
             return txt
 
-        self.log = make_text("輸出")
+        self.log = make_text("輸出(可直接貼上 log,再按「解析輸出視窗的 Log」)")
+        self._lock_log()
         self.parsed = make_text("解析結果")
 
     def _browse_exe(self):
@@ -927,10 +930,29 @@ class SpdmLogTab(ttk.Frame):
             self.log.configure(state="normal")
             for i in range(len(ranges) - 2, -1, -2):
                 self.log.delete(ranges[i], ranges[i + 1])
-            self.log.configure(state="disabled")
+            self._lock_log()
 
     # ---------- 執行 ----------
+    def _lock_log(self):
+        """輸出視窗平常可編輯(方便貼上 log),工具執行中才鎖住。"""
+        self.log.configure(state="disabled" if self.proc is not None else "normal")
+
+    def parse_pasted(self):
+        """解析輸出視窗目前的文字(可以是貼上去的 log),不需要執行工具。"""
+        if self.proc is not None:
+            return
+        text = self.log.get("1.0", "end-1c")
+        if not text.strip():
+            messagebox.showinfo("沒有內容", "輸出視窗是空的,請先貼上 log。")
+            return
+        self._show_parsed(text, 0)
+        self.parsed.configure(state="normal")
+        self.parsed.insert("1.0", "(解析輸出視窗的 Log,沒有結束碼,僅依內容判斷)\n\n", "info")
+        self.parsed.configure(state="disabled")
+        self.status.set("已解析輸出視窗的 Log")
+
     def _set_running(self, running):
+        self.btn_parse.configure(state="disabled" if running else "normal")
         self.btn_run.configure(state="disabled" if running else "normal")
         self.btn_stop.configure(state="normal" if running else "disabled")
 
@@ -1027,7 +1049,7 @@ class SpdmLogTab(ttk.Frame):
         self.log.configure(state="normal")
         self.log.insert("end", text, tag)
         self.log.see("end")
-        self.log.configure(state="disabled")
+        self._lock_log()
 
     def _append_stream(self, text):
         """\\r 代表回到行首,下一段文字覆蓋同一行。"""
@@ -1047,19 +1069,19 @@ class SpdmLogTab(ttk.Frame):
                     self._cr_pending = False
                 self.log.insert("end", tok)
         self.log.see("end")
-        self.log.configure(state="disabled")
+        self._lock_log()
 
     def _end_stream_line(self):
         self._cr_pending = False
         self.log.configure(state="normal")
         if self.log.get("end-2c", "end-1c") not in ("\n", ""):
             self.log.insert("end", "\n")
-        self.log.configure(state="disabled")
+        self._lock_log()
 
     def _clear_log(self):
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
-        self.log.configure(state="disabled")
+        self._lock_log()
         self._clear_parsed()
 
     def _clear_parsed(self):
