@@ -1115,6 +1115,7 @@ I2C_DEVICES = ("MCP2221",)
 I2C_COMMANDS = {
     "I2C Status": ["i2c_status"],
     "Get Serial No.": ["get_sn"],
+    "AP Auth Status": ["ap_auth_status"],
 }
 
 
