@@ -96,7 +96,7 @@ ts18xx_ftdi_flash --target ext --flash_index 0 --speed 12 --spi_mode 0 --bus_wid
 
 ### 4. I2C
 
-呼叫 `ts18xx_i2c`，透過 Command 下拉選單執行 I2C 相關指令。目前有 **I2C Status**（`i2c_status`）、**Get Serial No.**（`get_sn`）與 **AP Auth Status**（`ap_auth_status`），其他指令之後再補。
+呼叫 `ts18xx_i2c`，透過 Command 下拉選單執行 I2C 相關指令。目前有 **I2C Status**（`i2c_status`）、**Get Serial No.**（`get_sn`）、**EC Auth Status**（`ec_auth_status`）與 **AP Auth Status**（`ap_auth_status`），其他指令之後再補。
 
 | 介面上的選項 | 對應參數 | 預設 |
 | --- | --- | --- |
