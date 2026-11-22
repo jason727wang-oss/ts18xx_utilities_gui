@@ -1114,6 +1114,7 @@ I2C_DEVICES = ("MCP2221",)
 # Command 下拉選單:顯示名稱 -> 子命令參數(之後有新指令加在這裡即可)
 I2C_COMMANDS = {
     "I2C Status": ["i2c_status"],
+    "Get Serial No.": ["get_sn"],
 }
 
 

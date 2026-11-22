@@ -96,7 +96,7 @@ ts18xx_ftdi_flash --target ext --flash_index 0 --speed 12 --spi_mode 0 --bus_wid
 
 ### 4. I2C
 
-呼叫 `ts18xx_i2c`，透過 Command 下拉選單執行 I2C 相關指令。目前只有 **I2C Status**，其他指令之後再補。
+呼叫 `ts18xx_i2c`，透過 Command 下拉選單執行 I2C 相關指令。目前有 **I2C Status**（`i2c_status`）與 **Get Serial No.**（`get_sn`），其他指令之後再補。
 
 | 介面上的選項 | 對應參數 | 預設 |
 | --- | --- | --- |
@@ -105,7 +105,7 @@ ts18xx_ftdi_flash --target ext --flash_index 0 --speed 12 --spi_mode 0 --bus_wid
 | Address | `--address` | 0x11 |
 | Speed (kHz) | `--speed`（數字） | 100 |
 
-I2C Status 實際執行的指令：
+I2C Status 實際執行的指令（Get Serial No. 只是把結尾換成 `get_sn`）：
 
 ```
 ts18xx_i2c --device MCP2221 --index 0 --address 0x11 --speed 100 i2c_status
