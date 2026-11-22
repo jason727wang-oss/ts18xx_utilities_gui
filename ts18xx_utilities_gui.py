@@ -1109,6 +1109,267 @@ class SpdmLogTab(ttk.Frame):
         return rows
 
 
+I2C_DEFAULT_EXE = "ts18xx_i2c"
+I2C_DEVICES = ("MCP2221",)
+# Command 下拉選單:顯示名稱 -> 子命令參數(之後有新指令加在這裡即可)
+I2C_COMMANDS = {
+    "I2C Status": ["i2c_status"],
+}
+
+
+class I2cTab(ttk.Frame):
+    """ts18xx_i2c:共用參數(device / index / address / speed)+ Command 選單"""
+
+    def __init__(self, parent, saved, on_change):
+        super().__init__(parent)
+        self.on_change = on_change
+        self.proc = None
+        self.cmd_name = None
+        self.out_q = queue.Queue()
+        self._cr_pending = False
+
+        def pick(key, default):
+            v = saved.get(key)
+            return v if isinstance(v, str) and v else default
+
+        cmd_default = next(iter(I2C_COMMANDS))
+        cmd = pick("i2c_command", cmd_default)
+        self.vars = {
+            "exe": tk.StringVar(value=pick("i2c_exe", I2C_DEFAULT_EXE)),
+            "device": tk.StringVar(value=pick("i2c_device", I2C_DEVICES[0])),
+            "index": tk.StringVar(value=pick("i2c_index", "0")),
+            "address": tk.StringVar(value=pick("i2c_address", "0x11")),
+            "speed": tk.StringVar(value=pick("i2c_speed", "100")),
+            "command": tk.StringVar(value=cmd if cmd in I2C_COMMANDS else cmd_default),
+        }
+        self._build_ui()
+        for v in self.vars.values():
+            v.trace_add("write", lambda *_: (self._update_preview(), self.on_change()))
+        self._update_preview()
+        self.after(100, self._poll_output)
+
+    # ---------- UI ----------
+    def _build_ui(self):
+        pad = {"padx": 6, "pady": 5}
+
+        f = ttk.LabelFrame(self, text="路徑")
+        f.pack(fill="x", padx=10, pady=(10, 4))
+        f.columnconfigure(1, weight=1)
+        ttk.Label(f, text="ts18xx_i2c").grid(row=0, column=0, sticky="e", **pad)
+        ttk.Entry(f, textvariable=self.vars["exe"]).grid(row=0, column=1, sticky="ew", **pad)
+        ttk.Button(f, text="選擇…", command=self._browse_exe).grid(row=0, column=2, **pad)
+
+        fp = ttk.LabelFrame(self, text="連線參數")
+        fp.pack(fill="x", padx=10, pady=4)
+        ttk.Label(fp, text="Device --device").grid(row=0, column=0, sticky="w", padx=(10, 6), pady=(6, 0))
+        ttk.Label(fp, text="Index --index").grid(row=0, column=1, sticky="w", padx=6, pady=(6, 0))
+        ttk.Label(fp, text="Address --address").grid(row=0, column=2, sticky="w", padx=6, pady=(6, 0))
+        ttk.Label(fp, text="Speed (kHz) --speed").grid(row=0, column=3, sticky="w", padx=6, pady=(6, 0))
+        ttk.Combobox(fp, textvariable=self.vars["device"], values=I2C_DEVICES, width=12).grid(
+            row=1, column=0, sticky="w", padx=(10, 6), pady=(2, 8))
+        ttk.Entry(fp, textvariable=self.vars["index"], width=8).grid(
+            row=1, column=1, sticky="w", padx=6, pady=(2, 8))
+        ttk.Entry(fp, textvariable=self.vars["address"], width=10).grid(
+            row=1, column=2, sticky="w", padx=6, pady=(2, 8))
+        ttk.Entry(fp, textvariable=self.vars["speed"], width=10).grid(
+            row=1, column=3, sticky="w", padx=6, pady=(2, 8))
+
+        fc = ttk.LabelFrame(self, text="Command")
+        fc.pack(fill="x", padx=10, pady=4)
+        ttk.Combobox(fc, textvariable=self.vars["command"], values=list(I2C_COMMANDS),
+                     state="readonly", width=24).pack(side="left", padx=10, pady=8)
+
+        f_prev = ttk.LabelFrame(self, text="對應的指令")
+        f_prev.pack(fill="x", padx=10, pady=4)
+        f_prev.columnconfigure(0, weight=1)
+        self.preview = tk.Text(f_prev, height=3, wrap="word", state="disabled",
+                               background=self.winfo_toplevel().cget("background"), relief="flat")
+        self.preview.grid(row=0, column=0, sticky="ew", padx=6, pady=4)
+        ttk.Button(f_prev, text="複製指令", command=self._copy_cmd).grid(
+            row=1, column=0, sticky="e", padx=6, pady=(0, 4))
+
+        f_btn = ttk.Frame(self)
+        f_btn.pack(fill="x", padx=10, pady=4)
+        self.btn_run = ttk.Button(f_btn, text="▶ 執行 Cmd", command=self.run)
+        self.btn_run.pack(side="left")
+        self.btn_stop = ttk.Button(f_btn, text="■ 停止", command=self.stop, state="disabled")
+        self.btn_stop.pack(side="left", padx=6)
+        ttk.Button(f_btn, text="清除輸出", command=self._clear_log).pack(side="left")
+        self.status = tk.StringVar(value="就緒")
+        ttk.Label(f_btn, textvariable=self.status).pack(side="right")
+
+        f_log = ttk.LabelFrame(self, text="輸出")
+        f_log.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+        f_log.rowconfigure(0, weight=1)
+        f_log.columnconfigure(0, weight=1)
+        self.log = tk.Text(f_log, wrap="none", state="disabled", font=("Consolas", 10))
+        ys = ttk.Scrollbar(f_log, orient="vertical", command=self.log.yview)
+        xs = ttk.Scrollbar(f_log, orient="horizontal", command=self.log.xview)
+        self.log.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+        self.log.grid(row=0, column=0, sticky="nsew")
+        ys.grid(row=0, column=1, sticky="ns")
+        xs.grid(row=1, column=0, sticky="ew")
+        self.log.tag_configure("err", foreground="#c0392b")
+        self.log.tag_configure("ok", foreground="#1e8449")
+        self.log.tag_configure("info", foreground="#2471a3")
+
+    # ---------- 指令組合 ----------
+    def build_cmd(self):
+        v = {k: x.get().strip() for k, x in self.vars.items()}
+        return ([v["exe"], "--device", v["device"], "--index", v["index"],
+                 "--address", v["address"], "--speed", v["speed"]]
+                + I2C_COMMANDS.get(v["command"], []))
+
+    def cmdline(self):
+        return subprocess.list2cmdline(self.build_cmd())
+
+    def _update_preview(self):
+        self.preview.configure(state="normal")
+        self.preview.delete("1.0", "end")
+        self.preview.insert("1.0", self.cmdline())
+        self.preview.configure(state="disabled")
+
+    def _copy_cmd(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.cmdline())
+        self.status.set("已複製指令")
+
+    def _browse_exe(self):
+        init = os.path.dirname(self.vars["exe"].get()) or None
+        if init and not os.path.isdir(init):
+            init = None
+        p = filedialog.askopenfilename(title="選擇 ts18xx_i2c", initialdir=init,
+                                       filetypes=[("可執行檔", "*.exe *.bat *.cmd"), ("所有檔案", "*.*")])
+        if p:
+            self.vars["exe"].set(os.path.normpath(p))
+
+    # ---------- 執行 ----------
+    def _set_running(self, running):
+        self.btn_run.configure(state="disabled" if running else "normal")
+        self.btn_stop.configure(state="normal" if running else "disabled")
+
+    def run(self):
+        if self.proc is not None:
+            return
+        v = {k: x.get().strip() for k, x in self.vars.items()}
+        if not v["exe"]:
+            messagebox.showwarning("缺少參數", "請先填入 ts18xx_i2c 的路徑。")
+            return
+        if not v["device"] or not v["address"] or not v["index"].isdigit() or not v["speed"].isdigit():
+            messagebox.showwarning("參數錯誤", "Device、Address 不可空白;Index 與 Speed 必須是數字。")
+            return
+
+        self.cmd_name = v["command"]
+        self._append(f"\n===== {self.cmd_name} =====\n", "info")
+        self._append(f"> {self.cmdline()}\n", "info")
+        self.status.set(f"執行中:{self.cmd_name}")
+        self._set_running(True)
+        self.captured = []
+
+        flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        try:
+            self.proc = subprocess.Popen(
+                self.build_cmd(), stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                bufsize=0, env=_stream_env(), creationflags=flags)
+        except FileNotFoundError:
+            self._append("找不到 ts18xx_i2c,請確認路徑或 PATH 設定。\n", "err")
+            self._set_running(False)
+            self.status.set("失敗:找不到執行檔")
+            return
+        except Exception as e:
+            self._append(f"啟動失敗:{e}\n", "err")
+            self._set_running(False)
+            self.status.set("失敗")
+            return
+        threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
+
+    def _reader(self, proc):
+        dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        while True:
+            chunk = proc.stdout.read(4096)
+            if not chunk:
+                break
+            text = dec.decode(chunk)
+            if text:
+                self.out_q.put(("data", text))
+        proc.wait()
+        self.out_q.put(("done", proc.returncode))
+
+    def _poll_output(self):
+        try:
+            while True:
+                kind, data = self.out_q.get_nowait()
+                if kind == "data":
+                    self.captured.append(data)
+                    self._append_stream(data)
+                else:
+                    self._finish(data)
+        except queue.Empty:
+            pass
+        self.after(100, self._poll_output)
+
+    def _finish(self, code):
+        self.proc = None
+        self._end_stream_line()
+        text = "".join(self.captured)
+        ok = (code == 0) and not re.search(r"\[ERROR|Traceback", text)
+        if ok:
+            self._append(f"[完成] {self.cmd_name}\n", "ok")
+            self.status.set(f"完成:{self.cmd_name}")
+        else:
+            self._append(f"[失敗] {self.cmd_name}(結束碼 {code})\n", "err")
+            self.status.set(f"失敗:{self.cmd_name}")
+        self._set_running(False)
+
+    def stop(self):
+        if self.proc is not None:
+            self.proc.terminate()
+            self._append("[已要求停止]\n", "err")
+
+    def terminate(self):
+        if self.proc is not None:
+            self.proc.terminate()
+
+    # ---------- 輸出 ----------
+    def _append(self, text, tag=None):
+        self.log.configure(state="normal")
+        self.log.insert("end", text, tag)
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def _append_stream(self, text):
+        text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+        self.log.configure(state="normal")
+        for tok in re.split(r"(\r\n|\r|\n)", text):
+            if not tok:
+                continue
+            if tok == "\r":
+                self._cr_pending = True
+            elif tok in ("\n", "\r\n"):
+                self.log.insert("end", "\n")
+                self._cr_pending = False
+            else:
+                if self._cr_pending:
+                    self.log.delete("end-1c linestart", "end-1c")
+                    self._cr_pending = False
+                self.log.insert("end", tok)
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def _end_stream_line(self):
+        self._cr_pending = False
+        self.log.configure(state="normal")
+        if self.log.get("end-2c", "end-1c") not in ("\n", ""):
+            self.log.insert("end", "\n")
+        self.log.configure(state="disabled")
+
+    def _clear_log(self):
+        self.log.configure(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.configure(state="disabled")
+
+
 def _fmt_secs(sec):
     """秒數轉成易讀格式:12.3 s 或 1 min 05.2 s"""
     if sec < 60:
@@ -1159,6 +1420,8 @@ class FlashGui(tk.Tk):
         self.nb.add(self.tflx, text="TFLX Provisioning")
         self.spdm = SpdmLogTab(self.nb, self._raw, self._save_settings)
         self.nb.add(self.spdm, text="SPDM Log Paser")
+        self.i2c = I2cTab(self.nb, self._raw, self._save_settings)
+        self.nb.add(self.i2c, text="I2C")
 
         for v in list(self.vars.values()) + list(self.sel.values()) + [self.verify, self.smart]:
             v.trace_add("write", lambda *_: (self._update_preview(), self._save_settings()))
@@ -1601,6 +1864,10 @@ class FlashGui(tk.Tk):
         if spdm is not None:
             for k in ("exe", "iface", "port", "slot", "version", "pem_dir", "save_pem"):
                 data[f"spdm_{k}"] = spdm.vars[k].get()
+        i2c = getattr(self, "i2c", None)
+        if i2c is not None:
+            for k in ("exe", "device", "index", "address", "speed", "command"):
+                data[f"i2c_{k}"] = i2c.vars[k].get()
         try:
             SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError:
@@ -1608,7 +1875,7 @@ class FlashGui(tk.Tk):
 
     def _on_close(self):
         busy = (self.proc is not None or self.tflx.proc is not None
-                or self.spdm.proc is not None)
+                or self.spdm.proc is not None or self.i2c.proc is not None)
         if busy:
             if not messagebox.askyesno("確認", "仍有程序在執行,確定要離開嗎?"):
                 return
@@ -1617,6 +1884,7 @@ class FlashGui(tk.Tk):
                 self.proc.terminate()
             self.tflx.terminate()
             self.spdm.terminate()
+            self.i2c.terminate()
         self._save_settings()
         self.destroy()
 

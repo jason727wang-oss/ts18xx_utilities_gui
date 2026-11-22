@@ -6,7 +6,7 @@ TS18xx 開發板常用命令列工具的圖形介面（Tkinter）。把 `ts18xx_
 
 ## 功能
 
-程式有三個分頁：
+程式有四個分頁：
 
 ### 1. SPI Flash 燒錄
 
@@ -94,6 +94,26 @@ ts18xx_ftdi_flash --target ext --flash_index 0 --speed 12 --spi_mode 0 --bus_wid
 
 只使用 Python 標準函式庫；憑證的 Subject、Issuer、有效期間是用程式內建的簡易 DER 解析讀出的。
 
+### 4. I2C
+
+呼叫 `ts18xx_i2c`，透過 Command 下拉選單執行 I2C 相關指令。目前只有 **I2C Status**，其他指令之後再補。
+
+| 介面上的選項 | 對應參數 | 預設 |
+| --- | --- | --- |
+| Device | `--device` | MCP2221 |
+| Index | `--index`（數字） | 0 |
+| Address | `--address` | 0x11 |
+| Speed (kHz) | `--speed`（數字） | 100 |
+
+I2C Status 實際執行的指令：
+
+```
+ts18xx_i2c --device MCP2221 --index 0 --address 0x11 --speed 100 i2c_status
+```
+
+- `ts18xx_i2c` 路徑欄位預設為 `ts18xx_i2c`（在 PATH 內可直接使用），也可用「選擇…」指定。
+- 成功與否看結束碼為 0，且輸出沒有 `[ERROR]` 或 `Traceback`。
+
 ### 共通功能
 
 - 指令預覽。
@@ -138,6 +158,7 @@ python ts18xx_utilities_gui.py
 
 - Flash 燒錄：`ts18xx_ftdi_flash` 路徑、`spi_image` 資料夾、已勾選的組合、Speed、Bus Width、Verify、Smart。
 - TFLX Provisioning：`ts18xx_tflx_prov.exe` 與 `ap_otp.bin` 路徑。
+- I2C：`ts18xx_i2c` 路徑、Device、Index、Address、Speed、Command。
 - SPDM Log Paser：`ts18xx_spdm.exe` 路徑、Interface、SPT Channel、Cert Chain Slot、SPDM Version、憑證輸出資料夾與是否存檔。
 
 舊版放在程式旁邊的 `ts18xx_utilities_gui_settings.json` 仍會讀取一次並自動轉換。
