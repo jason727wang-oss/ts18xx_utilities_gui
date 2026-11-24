@@ -6,7 +6,7 @@ TS18xx 開發板常用命令列工具的圖形介面（Tkinter）。把 `ts18xx_
 
 ## 功能
 
-程式有四個分頁：
+程式有五個分頁：
 
 ### 1. SPI Flash 燒錄
 
@@ -116,6 +116,28 @@ ts18xx_i2c --device MCP2221 --index 0 --address 0x11 --speed 100 i2c_status
 - `ts18xx_i2c` 路徑欄位預設為 `ts18xx_i2c`（在 PATH 內可直接使用），也可用「選擇…」指定。
 - 成功與否看結束碼為 0，且輸出沒有 `[ERROR]` 或 `Traceback`。
 
+### 5. FTDI Flash
+
+呼叫 `ts18xx_ftdi_flash`，介面分成 Connection（Target、AP Index、SPI Speed、SPI Mode、Bus Width）、Command（按鈕）與 Parameters。基本指令：
+
+```
+ts18xx_ftdi_flash --target ap --ap_index 0 --speed 12 --spi_mode 0 --bus_width single <子命令與參數>
+```
+
+| Command | 實際指令（接在上面之後） | 狀態 |
+| --- | --- | --- |
+| Erase | `erase --cs 0` | 可用（整顆 chip erase） |
+| Read | `read --cs 0 --address 0x00000000 --length 256` | 可用 |
+| Write | `write --cs 0 --address 0x00000000 --data <hex>` | 可用；`--data` 為推測的參數名稱 |
+| Scan | `scan` | 可用 |
+| Set QE | `set_qe --cs all` | 可用 |
+| Program / Detect / Regs | — | 指令尚未提供，按鈕停用 |
+
+- Chip Select 的 `both` 會轉成 `--cs all`（推測，與 set_qe 的寫法一致）。
+- Target 為 `ap` 時使用 `--ap_index`，為 `ext` 時改用 `--flash_index`（與 SPI Flash 燒錄分頁一致，推測）。
+- Erase 的 Sector Address 與 Read 的 Output File 參數名稱尚未提供，目前沒有支援。
+- Address 輸入 8 位以內的十六進位數字（不含 `0x`），會補成 `0x%08X`；Data 需為偶數位十六進位。
+
 ### 共通功能
 
 - 指令預覽。
@@ -160,6 +182,7 @@ python ts18xx_utilities_gui.py
 
 - Flash 燒錄：`ts18xx_ftdi_flash` 路徑、`spi_image` 資料夾、已勾選的組合、Speed、Bus Width、Verify、Smart。
 - TFLX Provisioning：`ts18xx_tflx_prov.exe` 與 `ap_otp.bin` 路徑。
+- FTDI Flash：`ts18xx_ftdi_flash` 路徑與各欄位。
 - I2C：`ts18xx_i2c` 路徑、Device、Index、Address、Speed、Command。
 - SPDM Log Paser：`ts18xx_spdm.exe` 路徑、Interface、SPT Channel、Cert Chain Slot、SPDM Version、憑證輸出資料夾與是否存檔。
 

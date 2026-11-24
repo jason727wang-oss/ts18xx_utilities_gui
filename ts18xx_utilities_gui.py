@@ -1145,6 +1145,8 @@ I2C_COMMANDS = {
 class I2cTab(ttk.Frame):
     """ts18xx_i2c:共用參數(device / index / address / speed)+ Command 選單"""
 
+    EXE_NAME = "ts18xx_i2c"
+
     def __init__(self, parent, saved, on_change):
         super().__init__(parent)
         self.on_change = on_change
@@ -1204,6 +1206,9 @@ class I2cTab(ttk.Frame):
         ttk.Combobox(fc, textvariable=self.vars["command"], values=list(I2C_COMMANDS),
                      state="readonly", width=24).pack(side="left", padx=10, pady=8)
 
+        self._build_run_ui()
+
+    def _build_run_ui(self):
         f_prev = ttk.LabelFrame(self, text="對應的指令")
         f_prev.pack(fill="x", padx=10, pady=4)
         f_prev.columnconfigure(0, weight=1)
@@ -1248,6 +1253,11 @@ class I2cTab(ttk.Frame):
     def cmdline(self):
         return subprocess.list2cmdline(self.build_cmd())
 
+    def _validate(self, v):
+        if not v["device"] or not v["address"] or not v["index"].isdigit() or not v["speed"].isdigit():
+            return "Device、Address 不可空白;Index 與 Speed 必須是數字。"
+        return None
+
     def _update_preview(self):
         self.preview.configure(state="normal")
         self.preview.delete("1.0", "end")
@@ -1263,7 +1273,7 @@ class I2cTab(ttk.Frame):
         init = os.path.dirname(self.vars["exe"].get()) or None
         if init and not os.path.isdir(init):
             init = None
-        p = filedialog.askopenfilename(title="選擇 ts18xx_i2c", initialdir=init,
+        p = filedialog.askopenfilename(title=f"選擇 {self.EXE_NAME}", initialdir=init,
                                        filetypes=[("可執行檔", "*.exe *.bat *.cmd"), ("所有檔案", "*.*")])
         if p:
             self.vars["exe"].set(os.path.normpath(p))
@@ -1278,10 +1288,11 @@ class I2cTab(ttk.Frame):
             return
         v = {k: x.get().strip() for k, x in self.vars.items()}
         if not v["exe"]:
-            messagebox.showwarning("缺少參數", "請先填入 ts18xx_i2c 的路徑。")
+            messagebox.showwarning("缺少參數", f"請先填入 {self.EXE_NAME} 的路徑。")
             return
-        if not v["device"] or not v["address"] or not v["index"].isdigit() or not v["speed"].isdigit():
-            messagebox.showwarning("參數錯誤", "Device、Address 不可空白;Index 與 Speed 必須是數字。")
+        err = self._validate(v)
+        if err:
+            messagebox.showwarning("參數錯誤", err)
             return
 
         self.cmd_name = v["command"]
@@ -1298,7 +1309,7 @@ class I2cTab(ttk.Frame):
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 bufsize=0, env=_stream_env(), creationflags=flags)
         except FileNotFoundError:
-            self._append("找不到 ts18xx_i2c,請確認路徑或 PATH 設定。\n", "err")
+            self._append(f"找不到 {self.EXE_NAME},請確認路徑或 PATH 設定。\n", "err")
             self._set_running(False)
             self.status.set("失敗:找不到執行檔")
             return
@@ -1395,6 +1406,163 @@ class I2cTab(ttk.Frame):
         self.log.configure(state="disabled")
 
 
+FTDI_DEFAULT_EXE = "ts18xx_ftdi_flash"
+FTDI_TARGETS = ("ap", "ext")
+FTDI_INDEXES = ("0", "1", "2")
+FTDI_SPI_MODES = ("0", "1", "2", "3")
+FTDI_CS = ("0", "1", "both")      # both 對應 --cs all(推測,與 set_qe 的寫法一致)
+# Command 按鈕:名稱 -> (說明, 子命令參數(None 表示指令尚未提供), 會用到的 Parameters)
+FTDI_COMMANDS = {
+    "Program": ("Program a .bin image into the flash.", None, ()),
+    "Detect": ("Detect the flash device.", None, ()),
+    "Erase": ("Erase the full chip (sector erase not supported yet).", ["erase"], ("cs",)),
+    "Read": ("Read bytes from flash and hex-dump.", ["read"], ("cs", "address", "length")),
+    "Write": ("Write hex bytes at address (no erase).", ["write"], ("cs", "address", "data")),
+    "Scan": ("Scan for connected flash devices.", ["scan"], ()),
+    "Regs": ("Read flash status registers.", None, ()),
+    "Set QE": ("Set the Quad Enable bit on all chip selects.", ["set_qe", "--cs", "all"], ()),
+}
+
+
+class FtdiFlashTab(I2cTab):
+    """ts18xx_ftdi_flash:Connection / Command / Parameters。沿用 I2cTab 的執行與輸出機制。"""
+
+    EXE_NAME = "ts18xx_ftdi_flash"
+
+    def __init__(self, parent, saved, on_change):
+        ttk.Frame.__init__(self, parent)
+        self.on_change = on_change
+        self.proc = None
+        self.cmd_name = None
+        self.captured = []
+        self.out_q = queue.Queue()
+        self._cr_pending = False
+
+        def pick(key, default, allowed=None):
+            v = saved.get(key)
+            if isinstance(v, str) and v and (allowed is None or v in allowed):
+                return v
+            return default
+
+        self.vars = {
+            "exe": tk.StringVar(value=pick("ftdi_exe", FTDI_DEFAULT_EXE)),
+            "target": tk.StringVar(value=pick("ftdi_target", "ap", FTDI_TARGETS)),
+            "index": tk.StringVar(value=pick("ftdi_index", "0", FTDI_INDEXES)),
+            "speed": tk.StringVar(value=pick("ftdi_speed", "12", FLASH_SPEEDS)),
+            "mode": tk.StringVar(value=pick("ftdi_mode", "0", FTDI_SPI_MODES)),
+            "bus_width": tk.StringVar(value=pick("ftdi_bus_width", "single", FLASH_BUS_WIDTHS)),
+            "cs": tk.StringVar(value=pick("ftdi_cs", "0", FTDI_CS)),
+            "address": tk.StringVar(value=pick("ftdi_address", "00000000")),
+            "length": tk.StringVar(value=pick("ftdi_length", "256")),
+            "data": tk.StringVar(value=pick("ftdi_data", "")),
+            "command": tk.StringVar(value=pick("ftdi_command", "Erase", FTDI_COMMANDS)),
+        }
+        self._build_ui()
+        for v in self.vars.values():
+            v.trace_add("write", lambda *_: (self._update_preview(), self.on_change()))
+        self._update_preview()
+        self.after(100, self._poll_output)
+
+    def _build_ui(self):
+        pad = {"padx": 6, "pady": 5}
+
+        f = ttk.LabelFrame(self, text="路徑")
+        f.pack(fill="x", padx=10, pady=(10, 4))
+        f.columnconfigure(1, weight=1)
+        ttk.Label(f, text="ts18xx_ftdi_flash").grid(row=0, column=0, sticky="e", **pad)
+        ttk.Entry(f, textvariable=self.vars["exe"]).grid(row=0, column=1, sticky="ew", **pad)
+        ttk.Button(f, text="選擇…", command=self._browse_exe).grid(row=0, column=2, **pad)
+
+        fp = ttk.LabelFrame(self, text="Connection")
+        fp.pack(fill="x", padx=10, pady=4)
+        cols = (("Target", "target", FTDI_TARGETS), ("AP Index", "index", FTDI_INDEXES),
+                ("SPI Speed (MHz)", "speed", FLASH_SPEEDS), ("SPI Mode", "mode", FTDI_SPI_MODES),
+                ("Bus Width", "bus_width", FLASH_BUS_WIDTHS))
+        for i, (title, key, vals) in enumerate(cols):
+            px = (10, 6) if i == 0 else (6, 6)
+            ttk.Label(fp, text=title).grid(row=0, column=i, sticky="w", padx=px, pady=(6, 0))
+            ttk.Combobox(fp, textvariable=self.vars[key], values=vals, state="readonly",
+                         width=10).grid(row=1, column=i, sticky="w", padx=px, pady=(2, 8))
+
+        fc = ttk.LabelFrame(self, text="Command")
+        fc.pack(fill="x", padx=10, pady=4)
+        row = ttk.Frame(fc)
+        row.pack(fill="x", padx=8, pady=(6, 2))
+        for name, (_d, sub, _cs) in FTDI_COMMANDS.items():
+            ttk.Radiobutton(row, text=name, value=name, variable=self.vars["command"],
+                            style="Toolbutton", state="normal" if sub else "disabled"
+                            ).pack(side="left", padx=(0, 6))
+        self.cmd_desc = ttk.Label(fc, foreground="gray")
+        self.cmd_desc.pack(anchor="w", padx=10, pady=(0, 6))
+
+        fq = ttk.LabelFrame(self, text="Parameters")
+        fq.pack(fill="x", padx=10, pady=4)
+        self.param_widgets = {}
+        ttk.Label(fq, text="Chip Select").grid(row=0, column=0, sticky="w", padx=(10, 6), pady=(6, 0))
+        self.param_widgets["cs"] = ttk.Combobox(fq, textvariable=self.vars["cs"], values=FTDI_CS,
+                                                state="readonly", width=10)
+        self.param_widgets["cs"].grid(row=1, column=0, sticky="w", padx=(10, 6), pady=(2, 8))
+        ttk.Label(fq, text="Address (hex)").grid(row=0, column=1, sticky="w", padx=6, pady=(6, 0))
+        af = ttk.Frame(fq)
+        af.grid(row=1, column=1, sticky="w", padx=6, pady=(2, 8))
+        ttk.Label(af, text="0x").pack(side="left")
+        self.param_widgets["address"] = ttk.Entry(af, textvariable=self.vars["address"], width=12)
+        self.param_widgets["address"].pack(side="left")
+        ttk.Label(fq, text="Length (bytes)").grid(row=0, column=2, sticky="w", padx=6, pady=(6, 0))
+        self.param_widgets["length"] = ttk.Entry(fq, textvariable=self.vars["length"], width=10)
+        self.param_widgets["length"].grid(row=1, column=2, sticky="w", padx=6, pady=(2, 8))
+        ttk.Label(fq, text="Data (hex, e.g. DEADBEEF)").grid(row=0, column=3, sticky="w", padx=6, pady=(6, 0))
+        self.param_widgets["data"] = ttk.Entry(fq, textvariable=self.vars["data"], width=26)
+        self.param_widgets["data"].grid(row=1, column=3, sticky="w", padx=6, pady=(2, 8))
+        ttk.Label(fq, foreground="gray",
+                  text="Sector Address(Erase)與 Output File(Read)的命令列參數尚未提供;Write 的資料參數名稱 --data 為推測。").grid(
+            row=2, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 6))
+
+        self._build_run_ui()
+
+    def build_cmd(self):
+        v = {k: x.get().strip() for k, x in self.vars.items()}
+        _d, sub, params = FTDI_COMMANDS.get(v["command"], ("", None, ()))
+        # ap 用 --ap_index,ext 用 --flash_index(與 SPI Flash 燒錄分頁一致)
+        idx_flag = "--ap_index" if v["target"] == "ap" else "--flash_index"
+        cmd = [v["exe"], "--target", v["target"], idx_flag, v["index"],
+               "--speed", v["speed"], "--spi_mode", v["mode"],
+               "--bus_width", v["bus_width"]] + (sub or [])
+        if "cs" in params:
+            cmd += ["--cs", "all" if v["cs"] == "both" else v["cs"]]
+        if "address" in params:
+            try:
+                addr = "0x%08X" % int(v["address"] or "0", 16)
+            except ValueError:
+                addr = "0x" + v["address"]
+            cmd += ["--address", addr]
+        if "length" in params:
+            cmd += ["--length", v["length"]]
+        if "data" in params:
+            cmd += ["--data", v["data"]]
+        return cmd
+
+    def _validate(self, v):
+        _d, sub, params = FTDI_COMMANDS.get(v["command"], ("", None, ()))
+        if not sub:
+            return f"{v['command']} 的指令尚未提供。"
+        if "address" in params and not re.fullmatch(r"[0-9a-fA-F]{1,8}", v["address"] or "0"):
+            return "Address 必須是最多 8 位的十六進位數字(不含 0x)。"
+        if "length" in params and not re.fullmatch(r"[0-9]+", v["length"]) or v["length"] == "0" and "length" in params:
+            return "Length 必須是大於 0 的整數(bytes)。"
+        if "data" in params and not re.fullmatch(r"([0-9a-fA-F]{2})+", v["data"]):
+            return "Data 必須是偶數位的十六進位資料(例如 DEADBEEF)。"
+        return None
+
+    def _update_preview(self):
+        cmd = FTDI_COMMANDS.get(self.vars["command"].get())
+        self.cmd_desc.configure(text=cmd[0] if cmd else "")
+        used = cmd[2] if cmd else ()
+        for key, w in self.param_widgets.items():
+            w.configure(state=("readonly" if key == "cs" else "normal") if key in used else "disabled")
+        I2cTab._update_preview(self)
+
+
 def _fmt_secs(sec):
     """秒數轉成易讀格式:12.3 s 或 1 min 05.2 s"""
     if sec < 60:
@@ -1447,6 +1615,8 @@ class FlashGui(tk.Tk):
         self.nb.add(self.spdm, text="SPDM Log Paser")
         self.i2c = I2cTab(self.nb, self._raw, self._save_settings)
         self.nb.add(self.i2c, text="I2C")
+        self.ftdi = FtdiFlashTab(self.nb, self._raw, self._save_settings)
+        self.nb.add(self.ftdi, text="FTDI Flash")
 
         for v in list(self.vars.values()) + list(self.sel.values()) + [self.verify, self.smart]:
             v.trace_add("write", lambda *_: (self._update_preview(), self._save_settings()))
@@ -1893,6 +2063,10 @@ class FlashGui(tk.Tk):
         if i2c is not None:
             for k in ("exe", "device", "index", "address", "speed", "command"):
                 data[f"i2c_{k}"] = i2c.vars[k].get()
+        ftdi = getattr(self, "ftdi", None)
+        if ftdi is not None:
+            for k in ("exe", "target", "index", "speed", "mode", "bus_width", "cs", "address", "length", "data", "command"):
+                data[f"ftdi_{k}"] = ftdi.vars[k].get()
         try:
             SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError:
@@ -1900,7 +2074,8 @@ class FlashGui(tk.Tk):
 
     def _on_close(self):
         busy = (self.proc is not None or self.tflx.proc is not None
-                or self.spdm.proc is not None or self.i2c.proc is not None)
+                or self.spdm.proc is not None or self.i2c.proc is not None
+                or self.ftdi.proc is not None)
         if busy:
             if not messagebox.askyesno("確認", "仍有程序在執行,確定要離開嗎?"):
                 return
@@ -1910,6 +2085,7 @@ class FlashGui(tk.Tk):
             self.tflx.terminate()
             self.spdm.terminate()
             self.i2c.terminate()
+            self.ftdi.terminate()
         self._save_settings()
         self.destroy()
 
