@@ -1415,7 +1415,7 @@ FTDI_CS = ("0", "1", "both")      # both 對應 --cs all(推測,與 set_qe 的�
 FTDI_COMMANDS = {
     "Program": ("Program a .bin image into the flash.", None, ()),
     "Detect": ("Detect the flash device.", None, ()),
-    "Erase": ("Erase the full chip (sector erase not supported yet).", ["erase"], ("cs",)),
+    "Erase": ("Erase a sector (hex address) or full chip (leave sector blank).", ["erase"], ("cs", "sector")),
     "Read": ("Read bytes from flash and hex-dump.", ["read"], ("cs", "address", "length")),
     "Write": ("Write hex bytes at address (no erase).", ["write"], ("cs", "address", "data")),
     "Scan": ("Scan for connected flash devices.", None, ()),   # 暫時停用(原指令:["scan"])
@@ -1455,6 +1455,7 @@ class FtdiFlashTab(I2cTab):
             "address": tk.StringVar(value=pick("ftdi_address", "00000000")),
             "length": tk.StringVar(value=pick("ftdi_length", "256")),
             "data": tk.StringVar(value=pick("ftdi_data", "")),
+            "sector": tk.StringVar(value=saved.get("ftdi_sector", "") if isinstance(saved.get("ftdi_sector"), str) else ""),
             "command": tk.StringVar(value=pick("ftdi_command", "Erase", FTDI_COMMANDS)),
         }
         self._build_ui()
@@ -1514,9 +1515,16 @@ class FtdiFlashTab(I2cTab):
         ttk.Label(fq, text="Data (hex, e.g. DEADBEEF)").grid(row=0, column=3, sticky="w", padx=6, pady=(6, 0))
         self.param_widgets["data"] = ttk.Entry(fq, textvariable=self.vars["data"], width=26)
         self.param_widgets["data"].grid(row=1, column=3, sticky="w", padx=6, pady=(2, 8))
+        ttk.Label(fq, text="Sector Address (hex, 空白=整顆)").grid(
+            row=0, column=4, sticky="w", padx=6, pady=(6, 0))
+        sf = ttk.Frame(fq)
+        sf.grid(row=1, column=4, sticky="w", padx=6, pady=(2, 8))
+        ttk.Label(sf, text="0x").pack(side="left")
+        self.param_widgets["sector"] = ttk.Entry(sf, textvariable=self.vars["sector"], width=12)
+        self.param_widgets["sector"].pack(side="left")
         ttk.Label(fq, foreground="gray",
-                  text="Sector Address(Erase)與 Output File(Read)的命令列參數尚未提供;Write 的資料參數名稱 --data 為推測。").grid(
-            row=2, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 6))
+                  text="Read 的 Output File 參數尚未提供;Write 的資料參數名稱 --data 為推測。").grid(
+            row=2, column=0, columnspan=5, sticky="w", padx=10, pady=(0, 6))
 
         self._build_run_ui()
 
@@ -1540,6 +1548,12 @@ class FtdiFlashTab(I2cTab):
             cmd += ["--length", v["length"]]
         if "data" in params:
             cmd += ["--data", v["data"]]
+        if "sector" in params and v["sector"]:
+            try:
+                sec = "0x%X" % int(v["sector"], 16)
+            except ValueError:
+                sec = "0x" + v["sector"]
+            cmd += ["--sector", sec]
         return cmd
 
     def _validate(self, v):
@@ -1550,6 +1564,8 @@ class FtdiFlashTab(I2cTab):
             return "Address 必須是最多 8 位的十六進位數字(不含 0x)。"
         if "length" in params and not re.fullmatch(r"[0-9]+", v["length"]) or v["length"] == "0" and "length" in params:
             return "Length 必須是大於 0 的整數(bytes)。"
+        if "sector" in params and v["sector"] and not re.fullmatch(r"[0-9a-fA-F]{1,8}", v["sector"]):
+            return "Sector Address 必須是最多 8 位的十六進位數字(不含 0x),空白代表整顆 chip erase。"
         if "data" in params and not re.fullmatch(r"([0-9a-fA-F]{2})+", v["data"]):
             return "Data 必須是偶數位的十六進位資料(例如 DEADBEEF)。"
         return None
@@ -2065,7 +2081,7 @@ class FlashGui(tk.Tk):
                 data[f"i2c_{k}"] = i2c.vars[k].get()
         ftdi = getattr(self, "ftdi", None)
         if ftdi is not None:
-            for k in ("exe", "target", "index", "speed", "mode", "bus_width", "cs", "address", "length", "data", "command"):
+            for k in ("exe", "target", "index", "speed", "mode", "bus_width", "cs", "address", "length", "data", "sector", "command"):
                 data[f"ftdi_{k}"] = ftdi.vars[k].get()
         try:
             SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

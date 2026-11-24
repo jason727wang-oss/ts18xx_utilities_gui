@@ -126,7 +126,7 @@ ts18xx_ftdi_flash --target ap --ap_index 0 --speed 12 --spi_mode 0 --bus_width s
 
 | Command | 實際指令（接在上面之後） | 狀態 |
 | --- | --- | --- |
-| Erase | `erase --cs 0` | 可用（整顆 chip erase） |
+| Erase | `erase --cs 0`（整顆）或 `erase --cs 0 --sector 0x12`（指定 sector） | 可用；Sector Address 留空為整顆 chip erase |
 | Read | `read --cs 0 --address 0x00000000 --length 256` | 可用 |
 | Write | `write --cs 0 --address 0x00000000 --data <hex>` | 可用；`--data` 為推測的參數名稱 |
 | Program / Detect / Regs | — | 指令尚未提供，按鈕停用 |
@@ -134,7 +134,8 @@ ts18xx_ftdi_flash --target ap --ap_index 0 --speed 12 --spi_mode 0 --bus_width s
 
 - Chip Select 的 `both` 會轉成 `--cs all`（推測，與 set_qe 的寫法一致）。
 - Target 為 `ap` 時使用 `--ap_index`，為 `ext` 時改用 `--flash_index`（與 SPI Flash 燒錄分頁一致，推測）。
-- Erase 的 Sector Address 與 Read 的 Output File 參數名稱尚未提供，目前沒有支援。
+- Read 的 Output File 參數名稱尚未提供，目前沒有支援。
+- Sector Address 輸入 8 位以內的十六進位數字（不含 `0x`），會轉成 `--sector 0x12` 的形式。
 - Address 輸入 8 位以內的十六進位數字（不含 `0x`），會補成 `0x%08X`；Data 需為偶數位十六進位。
 
 ### 共通功能
