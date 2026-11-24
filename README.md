@@ -129,9 +129,9 @@ ts18xx_ftdi_flash --target ap --ap_index 0 --speed 12 --spi_mode 0 --bus_width s
 | Erase | `erase --cs 0` | 可用（整顆 chip erase） |
 | Read | `read --cs 0 --address 0x00000000 --length 256` | 可用 |
 | Write | `write --cs 0 --address 0x00000000 --data <hex>` | 可用；`--data` 為推測的參數名稱 |
-| Scan | `scan` | 可用 |
 | Set QE | `set_qe --cs all` | 可用 |
 | Program / Detect / Regs | — | 指令尚未提供，按鈕停用 |
+| Scan | `scan` | 暫時停用（按鈕反白不可選） |
 
 - Chip Select 的 `both` 會轉成 `--cs all`（推測，與 set_qe 的寫法一致）。
 - Target 為 `ap` 時使用 `--ap_index`，為 `ext` 時改用 `--flash_index`（與 SPI Flash 燒錄分頁一致，推測）。

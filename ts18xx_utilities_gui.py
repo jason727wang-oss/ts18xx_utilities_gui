@@ -1418,7 +1418,7 @@ FTDI_COMMANDS = {
     "Erase": ("Erase the full chip (sector erase not supported yet).", ["erase"], ("cs",)),
     "Read": ("Read bytes from flash and hex-dump.", ["read"], ("cs", "address", "length")),
     "Write": ("Write hex bytes at address (no erase).", ["write"], ("cs", "address", "data")),
-    "Scan": ("Scan for connected flash devices.", ["scan"], ()),
+    "Scan": ("Scan for connected flash devices.", None, ()),   # 暫時停用(原指令:["scan"])
     "Regs": ("Read flash status registers.", None, ()),
     "Set QE": ("Set the Quad Enable bit on all chip selects.", ["set_qe", "--cs", "all"], ()),
 }
