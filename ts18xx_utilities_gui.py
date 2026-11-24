@@ -1415,7 +1415,7 @@ FTDI_CS = ("0", "1", "both")      # both 對應 --cs all(推測,與 set_qe 的�
 FTDI_COMMANDS = {
     "Program": ("Program a .bin image into the flash.", None, ()),
     "Detect": ("Detect the flash device.", None, ()),
-    "Erase": ("Erase a sector (hex address) or full chip (leave sector blank).", ["erase"], ("cs", "sector")),
+    "Erase": ("Erase a sector (hex address) or the full chip (type All).", ["erase"], ("cs", "sector")),
     "Read": ("Read bytes from flash and hex-dump.", ["read"], ("cs", "address", "length")),
     "Write": ("Write hex bytes at address (no erase).", ["write"], ("cs", "address", "data")),
     "Scan": ("Scan for connected flash devices.", None, ()),   # 暫時停用(原指令:["scan"])
@@ -1455,7 +1455,7 @@ class FtdiFlashTab(I2cTab):
             "address": tk.StringVar(value=pick("ftdi_address", "00000000")),
             "length": tk.StringVar(value=pick("ftdi_length", "256")),
             "data": tk.StringVar(value=pick("ftdi_data", "")),
-            "sector": tk.StringVar(value=saved.get("ftdi_sector", "") if isinstance(saved.get("ftdi_sector"), str) else ""),
+            "sector": tk.StringVar(value=saved.get("ftdi_sector", "") if isinstance(saved.get("ftdi_sector"), str) else ""),  # 預設空白=不執行
             "command": tk.StringVar(value=pick("ftdi_command", "Erase", FTDI_COMMANDS)),
         }
         self._build_ui()
@@ -1515,7 +1515,7 @@ class FtdiFlashTab(I2cTab):
         ttk.Label(fq, text="Data (hex, e.g. DEADBEEF)").grid(row=0, column=3, sticky="w", padx=6, pady=(6, 0))
         self.param_widgets["data"] = ttk.Entry(fq, textvariable=self.vars["data"], width=26)
         self.param_widgets["data"].grid(row=1, column=3, sticky="w", padx=6, pady=(2, 8))
-        ttk.Label(fq, text="Sector Address (hex, 空白=整顆)").grid(
+        ttk.Label(fq, text="Sector Address (hex 或 All=整顆)").grid(
             row=0, column=4, sticky="w", padx=6, pady=(6, 0))
         sf = ttk.Frame(fq)
         sf.grid(row=1, column=4, sticky="w", padx=6, pady=(2, 8))
@@ -1548,7 +1548,7 @@ class FtdiFlashTab(I2cTab):
             cmd += ["--length", v["length"]]
         if "data" in params:
             cmd += ["--data", v["data"]]
-        if "sector" in params and v["sector"]:
+        if "sector" in params and v["sector"] and v["sector"].lower() != "all":
             try:
                 sec = "0x%X" % int(v["sector"], 16)
             except ValueError:
@@ -1564,8 +1564,10 @@ class FtdiFlashTab(I2cTab):
             return "Address 必須是最多 8 位的十六進位數字(不含 0x)。"
         if "length" in params and not re.fullmatch(r"[0-9]+", v["length"]) or v["length"] == "0" and "length" in params:
             return "Length 必須是大於 0 的整數(bytes)。"
-        if "sector" in params and v["sector"] and not re.fullmatch(r"[0-9a-fA-F]{1,8}", v["sector"]):
-            return "Sector Address 必須是最多 8 位的十六進位數字(不含 0x),空白代表整顆 chip erase。"
+        if "sector" in params and not (v["sector"].lower() == "all"
+                                       or re.fullmatch(r"[0-9a-fA-F]{1,8}", v["sector"])):
+            return ("請輸入 Sector Address(最多 8 位十六進位,不含 0x);"
+                    "若要整顆 chip erase,請輸入 All。空白不會執行。")
         if "data" in params and not re.fullmatch(r"([0-9a-fA-F]{2})+", v["data"]):
             return "Data 必須是偶數位的十六進位資料(例如 DEADBEEF)。"
         return None
@@ -1577,6 +1579,21 @@ class FtdiFlashTab(I2cTab):
         for key, w in self.param_widgets.items():
             w.configure(state=("readonly" if key == "cs" else "normal") if key in used else "disabled")
         I2cTab._update_preview(self)
+        if self.vars["command"].get() == "Erase" and not self.vars["sector"].get().strip():
+            self.preview.configure(state="normal")
+            self.preview.delete("1.0", "end")
+            self.preview.insert("1.0", "(請輸入 Sector Address;若要整顆 chip erase,請輸入 All)")
+            self.preview.configure(state="disabled")
+
+    def run(self):
+        if self.proc is not None:
+            return
+        v = {k: x.get().strip() for k, x in self.vars.items()}
+        if (v["command"] == "Erase" and v["sector"].lower() == "all"
+                and not messagebox.askyesno("確認整顆 Erase",
+                                            f"即將對 chip select {v['cs']} 執行整顆 chip erase,資料會全部清除。\n\n確定要執行嗎?")):
+            return
+        I2cTab.run(self)
 
 
 def _fmt_secs(sec):
