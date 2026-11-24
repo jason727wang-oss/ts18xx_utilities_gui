@@ -1420,7 +1420,7 @@ FTDI_COMMANDS = {
     "Write": ("Write hex bytes at address (no erase).", ["write"], ("cs", "address", "data")),
     "Scan": ("Scan for connected flash devices.", None, ()),   # 暫時停用(原指令:["scan"])
     "Regs": ("Read flash status registers.", None, ()),
-    "Set QE": ("Set the Quad Enable bit on all chip selects.", ["set_qe", "--cs", "all"], ()),
+    "Set QE": ("Set the Quad Enable bit on all chip selects.", None, ()),   # 暫時停用(原指令:["set_qe", "--cs", "all"])
 }
 
 
