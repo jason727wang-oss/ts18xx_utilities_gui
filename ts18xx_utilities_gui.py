@@ -1431,7 +1431,7 @@ FTDI_DEFAULT_EXE = "ts18xx_ftdi_flash"
 FTDI_TARGETS = ("ap", "ext")
 FTDI_INDEXES = ("0", "1", "2")
 FTDI_SPI_MODES = ("0", "1", "2", "3")
-FTDI_CS = ("0", "1", "both")      # both 對應 --cs all(推測,與 set_qe 的寫法一致)
+FTDI_CS = ("0", "1")
 # Command 按鈕:名稱 -> (說明, 子命令參數(None 表示指令尚未提供), 會用到的 Parameters)
 FTDI_COMMANDS = {
     "Program": ("Program a .bin image into the flash.", None, ()),
