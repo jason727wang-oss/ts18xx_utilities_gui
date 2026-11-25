@@ -33,6 +33,9 @@ DEFAULTS = {
     "action": "program",
 }
 FLASH_SPEEDS = ("12", "15", "20", "24")          # --speed (MHz)
+FLASH_NEXT_DELAY_MS = 1000    # 換下一顆 flash 前的等待時間
+FLASH_DETECT_TRIES = 3        # 遇到 Auto-detect failed 時,同一顆最多嘗試幾次
+DETECT_FAIL_RE = re.compile(r"Auto-detect failed|no supported flash detected")
 FLASH_ACTIONS = ("program", "scan", "set_qe")      # 要執行的子命令
 FLASH_BUS_WIDTHS = ("single", "dual", "quad")    # --bus_width
 
@@ -1628,6 +1631,7 @@ class FlashGui(tk.Tk):
         self.verify = tk.BooleanVar(value=False)   # --verify
         self.smart = tk.BooleanVar(value=False)    # --smart
         self.job_start = None                      # 目前項目的開始時間
+        self.attempt = 1                           # 目前這一顆的第幾次嘗試
         self.job_times = {}                        # {(fi, cs): 秒}
         self._load_settings()
 
@@ -1904,11 +1908,20 @@ class FlashGui(tk.Tk):
     def _next_job(self):
         fi, cs = self.jobs.pop(0)
         self.cur = (fi, cs)
+        self.attempt = 1
+        idx = self.job_total - len(self.jobs)
+        self._append(f"\n===== [{idx}/{self.job_total}] flash_index {fi}, cs {cs} =====\n", "info")
+        self._start_attempt()
+
+    def _start_attempt(self):
+        """啟動目前這一顆的一次嘗試(Auto-detect failed 時會重試,所以和 _next_job 分開)。"""
+        fi, cs = self.cur
         idx = self.job_total - len(self.jobs)
         cmd = self.build_cmd(fi, cs)
-        self._append(f"\n===== [{idx}/{self.job_total}] flash_index {fi}, cs {cs} =====\n", "info")
+        self.captured = []
         self._append(f"> {subprocess.list2cmdline(cmd)}\n", "info")
-        self.status.set(f"執行中 ({idx}/{self.job_total}):flash {fi} / cs {cs}")
+        tries = f",第 {self.attempt}/{FLASH_DETECT_TRIES} 次" if self.attempt > 1 else ""
+        self.status.set(f"執行中 ({idx}/{self.job_total}):flash {fi} / cs {cs}{tries}")
 
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         self.job_start = time.monotonic()
@@ -1946,6 +1959,7 @@ class FlashGui(tk.Tk):
             while True:
                 kind, data = self.out_q.get_nowait()
                 if kind == "data":
+                    self.captured.append(data)
                     self._append_stream(data)
                 else:
                     self._finish(data)
@@ -1954,23 +1968,58 @@ class FlashGui(tk.Tk):
         self.after(100, self._poll_output)
 
     def _finish(self, code):
-        """目前這一個項目結束:成功就接著燒下一個,失敗或被停止就中止後面的。"""
+        """目前這一次嘗試結束。
+
+        - Auto-detect failed(找不到 flash):1 秒後重試,最多 FLASH_DETECT_TRIES 次;
+          仍失敗就記為「燒入失敗」,但會繼續處理後面的項目。
+        - 其他失敗(結束碼非 0、輸出有 [ERROR]、program=False)或被停止:中止後面的項目。
+        - 成功:等 1 秒再換下一顆。
+        """
         self.proc = None
         self._end_stream_line()
-        ok = (code == 0)
-        self.job_results.append((self.cur, ok, code))
+        text = "".join(self.captured)
+        detect_fail = bool(DETECT_FAIL_RE.search(text))
+        ok = (code == 0 and not detect_fail
+              and not re.search(r"\[ERROR|Traceback|program=False", text))
         elapsed = time.monotonic() - self.job_start if self.job_start else None
         if elapsed is not None:
-            self.job_times[self.cur] = elapsed
+            self.job_times[self.cur] = self.job_times.get(self.cur, 0) + elapsed
         t = f",耗時 {_fmt_secs(elapsed)}" if elapsed is not None else ""
+
+        if detect_fail and not self.cancelled and self.attempt < FLASH_DETECT_TRIES:
+            self.attempt += 1
+            self._append(f"[Auto-detect failed{t}] 1 秒後重試 ({self.attempt}/{FLASH_DETECT_TRIES})\n", "err")
+            self.after(FLASH_NEXT_DELAY_MS, self._retry_attempt)
+            return
+
+        reason = code
+        if detect_fail:
+            reason = f"Auto-detect failed,已試 {self.attempt} 次"
+        elif code == 0 and not ok:
+            reason = "輸出含錯誤訊息"
+        self.job_results.append((self.cur, ok, reason))
         if ok:
             self._append(f"[完成] 結束碼 0{t}\n", "ok")
         else:
-            self._append(f"[失敗] 結束碼 {code}{t}\n", "err")
-        if ok and not self.cancelled and self.jobs:
-            self._next_job()
+            self._append(f"[失敗] {reason if isinstance(reason, str) else f'結束碼 {code}'}{t}\n", "err")
+        # 找不到 flash 的項目已記為失敗,但後面的項目照常執行
+        if (ok or detect_fail) and not self.cancelled and self.jobs:
+            self.after(FLASH_NEXT_DELAY_MS, self._delayed_next)
         else:
             self._all_done()
+
+    def _retry_attempt(self):
+        if self.cancelled:
+            self.job_results.append((self.cur, False, "已停止"))
+            self._all_done()
+        else:
+            self._start_attempt()
+
+    def _delayed_next(self):
+        if self.cancelled:
+            self._all_done()
+        else:
+            self._next_job()
 
     def _all_done(self):
         self.proc = None
@@ -1984,7 +2033,7 @@ class FlashGui(tk.Tk):
             t = self.job_times.get((fi, cs))
             ts = f"  耗時 {_fmt_secs(t)}" if t is not None else ""
             lines.append(f"✔ flash {fi} / cs {cs}{ts}" if ok
-                         else f"✘ flash {fi} / cs {cs}(結束碼 {code}){ts}")
+                         else f"✘ flash {fi} / cs {cs}  燒入失敗({'結束碼 ' + str(code) if not isinstance(code, str) else code}){ts}")
         for fi, cs in skipped:
             lines.append(f"- flash {fi} / cs {cs}(未執行)")
         if self.job_times:
