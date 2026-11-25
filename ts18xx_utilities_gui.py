@@ -95,6 +95,7 @@ class TflxProvTab(ttk.Frame):
         self.vars = {
             "exe": tk.StringVar(value=pick("tflx_exe", TFLX_DEFAULT_EXE)),
             "img": tk.StringVar(value=pick("tflx_img", TFLX_DEFAULT_IMG)),
+            "stash_timeout": tk.StringVar(value=pick("tflx_stash_timeout", "0")),
         }
         self._build_ui()
         for v in self.vars.values():
@@ -120,6 +121,15 @@ class TflxProvTab(ttk.Frame):
 
         self.img_status = ttk.Label(f, text="")
         self.img_status.grid(row=2, column=1, sticky="w", padx=6)
+
+        ttk.Label(f, text="Auto-exit timeout (s)").grid(row=3, column=0, sticky="e", **pad)
+        ft = ttk.Frame(f)
+        ft.grid(row=3, column=1, columnspan=2, sticky="w", **pad)
+        ttk.Entry(ft, textvariable=self.vars["stash_timeout"], width=6).pack(side="left")
+        ttk.Label(ft, foreground="gray",
+                  text="0 = 一直等待 init(預設,不加參數);1–30 = 加上 --stash_timeout,"
+                       "逾時沒收到 init 就自動還原 stash 並離開(只用於 Start Provisioning)").pack(
+            side="left", padx=8)
 
         ttk.Label(self, foreground="gray",
                   text="固定參數:--iface_type spi  -i 0(FTDI SPI, channel 0)").pack(
@@ -184,7 +194,11 @@ class TflxProvTab(ttk.Frame):
         exe = self.vars["exe"].get().strip()
         base = [exe, "--iface_type", "spi", "-i", "0"]
         if action == "write":
-            return base + ["write", "--img_in", self.vars["img"].get().strip(), "--stash"]
+            cmd = base + ["write", "--img_in", self.vars["img"].get().strip(), "--stash"]
+            t = self.vars["stash_timeout"].get().strip()
+            if t.isdigit() and int(t) > 0:
+                cmd += ["--stash_timeout", str(int(t))]
+            return cmd
         if action == "load":
             return base + ["exit", "stash"]
         return base + ["cmd", "--stash_clear"]
@@ -250,6 +264,10 @@ class TflxProvTab(ttk.Frame):
             img = self.vars["img"].get().strip()
             if not img or not Path(img).is_file():
                 messagebox.showerror("找不到檔案", f"找不到 ap_otp.bin:\n{img}")
+                return
+            t = self.vars["stash_timeout"].get().strip()
+            if not t.isdigit() or int(t) > 30:
+                messagebox.showerror("參數錯誤", "Auto-exit timeout 必須是 0–30 的整數(秒)。")
                 return
 
         cmd = self.build_cmd(action)
@@ -2137,6 +2155,7 @@ class FlashGui(tk.Tk):
         if tflx is not None:
             data["tflx_exe"] = tflx.vars["exe"].get()
             data["tflx_img"] = tflx.vars["img"].get()
+            data["tflx_stash_timeout"] = tflx.vars["stash_timeout"].get()
         spdm = getattr(self, "spdm", None)
         if spdm is not None:
             for k in ("exe", "iface", "port", "slot", "version", "pem_dir", "save_pem"):

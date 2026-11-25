@@ -51,6 +51,7 @@ ts18xx_ftdi_flash --target ext --flash_index 0 --speed 12 --spi_mode 0 --bus_wid
 | ⌫ Stash Clear | 清除 stash | `cmd --stash_clear` |
 
 - 固定參數：`--iface_type spi -i 0`（FTDI SPI，channel 0）。
+- **Auto-exit timeout (s)**：對應 `write` 的 `--stash_timeout SECONDS`（只能搭配 `--stash`）。裝置下次進入 provisioning port 後，等待 init 指令的秒數；逾時沒收到就自動還原 stash 的 OTP 值並重置。填 `0`（預設）代表一直等待，**不加參數**；填 1–30 則加上 `--stash_timeout N`，例如：`write --img_in <ap_otp.bin> --stash --stash_timeout 3`。只影響 Start Provisioning。
 - **執行任何動作前，請先按下 EVB 的 RESET**，讓裝置進入 provisioning mode；若輸出出現 `RW_ERROR`，通常就是忘了這一步。
 - Start Provisioning 時工具會詢問是否更新韌體 `[y/N]`，GUI 會自動回答 `n`。若要在命令列手動執行，需用管線送入：`echo n | ...`。
 - 這個工具失敗時結束碼仍可能是 0，所以 GUI 會再檢查輸出文字（例如 `bytes match`、`left provisioning mode`、`Restoring OTP values`、`erased from on-device flash`）來判斷成功或失敗。
