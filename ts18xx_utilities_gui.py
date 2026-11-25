@@ -32,7 +32,7 @@ DEFAULTS = {
     "bus_width": "single",
     "action": "program",
 }
-FLASH_SPEEDS = ("12", "15", "20", "24")          # --speed (MHz)
+FLASH_SPEEDS = ("6", "12", "15", "20")          # --speed (MHz)
 FLASH_NEXT_DELAY_MS = 1000    # 換下一顆 flash 前的等待時間
 FLASH_DETECT_TRIES = 3        # 遇到 Auto-detect failed 時,同一顆最多嘗試幾次
 DETECT_FAIL_RE = re.compile(r"Auto-detect failed|no supported flash detected")
